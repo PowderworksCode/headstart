@@ -1,0 +1,55 @@
+diff --git a/src/compiler/build_runner/mod.rs b/src/compiler/build_runner/mod.rs
+index 4bf69f6..ec435fb 100644
+--- a/src/compiler/build_runner/mod.rs
++++ b/src/compiler/build_runner/mod.rs
+@@ -763,6 +763,12 @@ impl<'a, 'gctx> BuildRunner<'a, 'gctx> {
+     /// Returns whether when `parent` depends on `dep` if it only requires the
+     /// metadata file from `dep`.
+     pub fn only_requires_rmeta(&self, parent: &Unit, dep: &Unit) -> bool {
++        // Headstart: a check unit needs only its check dependencies' metadata,
++        // which `-Zearly-metadata` writes before their bodies are checked.
++        if headstart() && parent.mode.is_check() && dep.mode == (CompileMode::Check { test: false })
++        {
++            return true;
++        }
+         // We're only a candidate for requiring an `rmeta` file if we
+         // ourselves are building an rlib,
+         !parent.requires_upstream_objects()
+@@ -773,6 +779,13 @@ impl<'a, 'gctx> BuildRunner<'a, 'gctx> {
+             && dep.mode == CompileMode::Build
+     }
+ 
++    /// Whether headstart is on (`CARGO_HEADSTART=1`): check units are built
++    /// with `-Zearly-metadata`, and a check unit's dependents start as soon as
++    /// its metadata is written, before its function bodies are checked.
++    pub fn headstart_enabled(&self) -> bool {
++        headstart()
++    }
++
+     /// Returns whether when `unit` is built whether it should emit metadata as
+     /// well because some compilations rely on that.
+     pub fn rmeta_required(&self, unit: &Unit) -> bool {
+@@ -816,3 +829,9 @@ impl<'a, 'gctx> BuildRunner<'a, 'gctx> {
+         }
+     }
+ }
++
++fn headstart() -> bool {
++    static ON: std::sync::LazyLock<bool> =
++        std::sync::LazyLock::new(|| std::env::var_os("CARGO_HEADSTART").is_some_and(|v| v == "1"));
++    *ON
++}
+diff --git a/src/compiler/mod.rs b/src/compiler/mod.rs
+index fae7bab..07849ac 100644
+--- a/src/compiler/mod.rs
++++ b/src/compiler/mod.rs
+@@ -1348,6 +1348,9 @@ fn build_base_args(
+ 
+     if unit.mode.is_check() {
+         cmd.arg("--emit=dep-info,metadata");
++        if build_runner.headstart_enabled() && build_runner.rmeta_required(unit) {
++            cmd.arg("-Zearly-metadata");
++        }
+     } else if !build_runner
+         .bcx
+         .target_data

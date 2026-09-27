@@ -1,0 +1,23 @@
+# Build config for the headstart rustc. scripts/setup.sh copies it to
+# rustc/bootstrap.toml (gitignored upstream).
+#
+# The upstream "compiler" profile, minus the settings that make a dev rustc
+# unrepresentatively slow. Benchmarks compare this compiler with and without
+# -Zearly-metadata, never against a distributed rustc.
+profile = "compiler"
+change-id = "ignore"
+
+[build]
+compiler-docs = false
+extended = false
+
+[rust]
+debug-assertions = false
+debug-logging = false
+debuginfo-level = "line-tables-only"
+incremental = true
+lto = "off"
+download-rustc = false
+
+[llvm]
+download-ci-llvm = true

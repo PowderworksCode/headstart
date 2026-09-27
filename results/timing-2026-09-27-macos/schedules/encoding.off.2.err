@@ -1,0 +1,295 @@
+warning: `package.homepage` is redundant with `package.repository`
+  --> src/types/Cargo.toml:9:12
+   |
+ 9 | homepage = "https://github.com/lifthrasiir/rust-encoding"
+   |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+10 | documentation = "https://lifthrasiir.github.io/rust-encoding/"
+11 | repository = "https://github.com/lifthrasiir/rust-encoding"
+   |              ----------------------------------------------
+   |
+   = note: `cargo::redundant_homepage` is set to `warn` by default
+help: consider removing `package.homepage`
+warning: `package.homepage` is redundant with `package.repository`
+ --> Cargo.toml:7:12
+  |
+7 | homepage = "https://github.com/lifthrasiir/rust-encoding"
+  |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+8 | documentation = "https://lifthrasiir.github.io/rust-encoding/"
+9 | repository = "https://github.com/lifthrasiir/rust-encoding"
+  |              ----------------------------------------------
+  |
+  = note: `cargo::redundant_homepage` is set to `warn` by default
+help: consider removing `package.homepage`
+src/types/lib.rs:297:9: warning: use of deprecated macro `try`: use the `?` operator instead
+src/types/lib.rs:298:9: warning: use of deprecated macro `try`: use the `?` operator instead
+src/types/lib.rs:299:9: warning: use of deprecated macro `try`: use the `?` operator instead
+src/types/lib.rs:310:36: warning: trait objects without an explicit `dyn` are deprecated
+src/types/lib.rs:310:75: warning: trait objects without an explicit `dyn` are deprecated
+src/types/lib.rs:306:36: warning: trait objects without an explicit `dyn` are deprecated
+src/types/lib.rs:306:74: warning: trait objects without an explicit `dyn` are deprecated
+src/types/lib.rs:182:34: warning: trait objects without an explicit `dyn` are deprecated
+src/types/lib.rs:295:29: warning: trait objects without an explicit `dyn` are deprecated
+src/types/lib.rs:196:34: warning: trait objects without an explicit `dyn` are deprecated
+src/types/lib.rs:199:34: warning: trait objects without an explicit `dyn` are deprecated
+src/types/lib.rs:211:67: warning: trait objects without an explicit `dyn` are deprecated
+src/types/lib.rs:259:68: warning: trait objects without an explicit `dyn` are deprecated
+src/types/lib.rs:161:32: warning: trait objects without an explicit `dyn` are deprecated
+src/types/lib.rs:172:55: warning: trait objects without an explicit `dyn` are deprecated
+src/types/lib.rs:177:43: warning: trait objects without an explicit `dyn` are deprecated
+src/types/lib.rs:137:32: warning: trait objects without an explicit `dyn` are deprecated
+src/types/lib.rs:148:54: warning: trait objects without an explicit `dyn` are deprecated
+src/types/lib.rs:154:43: warning: trait objects without an explicit `dyn` are deprecated
+src/types/lib.rs:378:35: warning: trait objects without an explicit `dyn` are deprecated
+src/types/lib.rs:378:73: warning: trait objects without an explicit `dyn` are deprecated
+src/types/lib.rs:332:38: warning: trait objects without an explicit `dyn` are deprecated
+src/types/lib.rs:332:77: warning: trait objects without an explicit `dyn` are deprecated
+src/types/lib.rs:377:38: warning: trait objects without an explicit `dyn` are deprecated
+src/types/lib.rs:377:76: warning: trait objects without an explicit `dyn` are deprecated
+src/index/korean/euc_kr.rs:19:14: warning: `...` range patterns are deprecated: help: use `..=` for an inclusive range
+src/index/korean/euc_kr.rs:20:15: warning: `...` range patterns are deprecated: help: use `..=` for an inclusive range
+src/index/korean/euc_kr.rs:21:15: warning: `...` range patterns are deprecated: help: use `..=` for an inclusive range
+src/index/korean/euc_kr.rs:23:15: warning: `...` range patterns are deprecated: help: use `..=` for an inclusive range
+src/index/korean/euc_kr.rs:29:14: warning: `...` range patterns are deprecated: help: use `..=` for an inclusive range
+src/index/korean/euc_kr.rs:30:15: warning: `...` range patterns are deprecated: help: use `..=` for an inclusive range
+src/index/korean/euc_kr.rs:31:15: warning: `...` range patterns are deprecated: help: use `..=` for an inclusive range
+src/index/korean/euc_kr.rs:32:15: warning: `...` range patterns are deprecated: help: use `..=` for an inclusive range
+src/index/japanese/jis0208.rs:16:10: warning: `...` range patterns are deprecated: help: use `..=` for an inclusive range
+src/index/japanese/jis0208.rs:17:12: warning: `...` range patterns are deprecated: help: use `..=` for an inclusive range
+src/index/japanese/jis0208.rs:18:13: warning: `...` range patterns are deprecated: help: use `..=` for an inclusive range
+src/index/japanese/jis0208.rs:19:13: warning: `...` range patterns are deprecated: help: use `..=` for an inclusive range
+src/index/japanese/jis0208.rs:20:13: warning: `...` range patterns are deprecated: help: use `..=` for an inclusive range
+src/index/japanese/jis0208.rs:21:13: warning: `...` range patterns are deprecated: help: use `..=` for an inclusive range
+src/index/japanese/jis0208.rs:22:13: warning: `...` range patterns are deprecated: help: use `..=` for an inclusive range
+src/index/japanese/jis0208.rs:23:13: warning: `...` range patterns are deprecated: help: use `..=` for an inclusive range
+src/index/japanese/jis0212.rs:16:10: warning: `...` range patterns are deprecated: help: use `..=` for an inclusive range
+src/index/japanese/jis0212.rs:17:12: warning: `...` range patterns are deprecated: help: use `..=` for an inclusive range
+src/index/japanese/jis0212.rs:18:12: warning: `...` range patterns are deprecated: help: use `..=` for an inclusive range
+src/index/japanese/jis0212.rs:19:13: warning: `...` range patterns are deprecated: help: use `..=` for an inclusive range
+src/codec/utf_16.rs:59:24: warning: `...` range patterns are deprecated: help: use `..=` for an inclusive range
+src/codec/utf_16.rs:59:50: warning: `...` range patterns are deprecated: help: use `..=` for an inclusive range
+src/codec/utf_16.rs:63:28: warning: `...` range patterns are deprecated: help: use `..=` for an inclusive range
+src/codec/utf_16.rs:146:27: warning: `...` range patterns are deprecated: help: use `..=` for an inclusive range
+src/codec/utf_16.rs:159:27: warning: `...` range patterns are deprecated: help: use `..=` for an inclusive range
+src/codec/utf_16.rs:163:27: warning: `...` range patterns are deprecated: help: use `..=` for an inclusive range
+src/codec/utf_16.rs:187:23: warning: `...` range patterns are deprecated: help: use `..=` for an inclusive range
+src/codec/utf_16.rs:212:23: warning: `...` range patterns are deprecated: help: use `..=` for an inclusive range
+src/codec/utf_16.rs:221:31: warning: `...` range patterns are deprecated: help: use `..=` for an inclusive range
+src/codec/utf_16.rs:232:23: warning: `...` range patterns are deprecated: help: use `..=` for an inclusive range
+src/codec/korean.rs:110:18: warning: `...` range patterns are deprecated: help: use `..=` for an inclusive range
+src/codec/korean.rs:110:31: warning: `...` range patterns are deprecated: help: use `..=` for an inclusive range
+src/codec/korean.rs:119:22: warning: `...` range patterns are deprecated: help: use `..=` for an inclusive range
+src/codec/korean.rs:120:22: warning: `...` range patterns are deprecated: help: use `..=` for an inclusive range
+src/codec/japanese.rs:56:24: warning: `...` range patterns are deprecated: help: use `..=` for an inclusive range
+src/codec/japanese.rs:59:27: warning: `...` range patterns are deprecated: help: use `..=` for an inclusive range
+src/codec/japanese.rs:124:18: warning: `...` range patterns are deprecated: help: use `..=` for an inclusive range
+src/codec/japanese.rs:124:31: warning: `...` range patterns are deprecated: help: use `..=` for an inclusive range
+src/codec/japanese.rs:136:18: warning: `...` range patterns are deprecated: help: use `..=` for an inclusive range
+src/codec/japanese.rs:136:31: warning: `...` range patterns are deprecated: help: use `..=` for an inclusive range
+src/codec/japanese.rs:145:22: warning: `...` range patterns are deprecated: help: use `..=` for an inclusive range
+src/codec/japanese.rs:148:22: warning: `...` range patterns are deprecated: help: use `..=` for an inclusive range
+src/codec/japanese.rs:155:22: warning: `...` range patterns are deprecated: help: use `..=` for an inclusive range
+src/codec/japanese.rs:156:18: warning: `...` range patterns are deprecated: help: use `..=` for an inclusive range
+src/codec/japanese.rs:163:22: warning: `...` range patterns are deprecated: help: use `..=` for an inclusive range
+src/codec/japanese.rs:170:22: warning: `...` range patterns are deprecated: help: use `..=` for an inclusive range
+src/codec/japanese.rs:181:22: warning: `...` range patterns are deprecated: help: use `..=` for an inclusive range
+src/codec/japanese.rs:476:24: warning: `...` range patterns are deprecated: help: use `..=` for an inclusive range
+src/codec/japanese.rs:479:27: warning: `...` range patterns are deprecated: help: use `..=` for an inclusive range
+src/codec/japanese.rs:548:18: warning: `...` range patterns are deprecated: help: use `..=` for an inclusive range
+src/codec/japanese.rs:548:31: warning: `...` range patterns are deprecated: help: use `..=` for an inclusive range
+src/codec/japanese.rs:548:47: warning: `...` range patterns are deprecated: help: use `..=` for an inclusive range
+src/codec/japanese.rs:548:60: warning: `...` range patterns are deprecated: help: use `..=` for an inclusive range
+src/codec/japanese.rs:550:18: warning: `...` range patterns are deprecated: help: use `..=` for an inclusive range
+src/codec/japanese.rs:550:31: warning: `...` range patterns are deprecated: help: use `..=` for an inclusive range
+src/codec/japanese.rs:550:47: warning: `...` range patterns are deprecated: help: use `..=` for an inclusive range
+src/codec/japanese.rs:550:60: warning: `...` range patterns are deprecated: help: use `..=` for an inclusive range
+src/codec/japanese.rs:551:18: warning: `...` range patterns are deprecated: help: use `..=` for an inclusive range
+src/codec/japanese.rs:551:31: warning: `...` range patterns are deprecated: help: use `..=` for an inclusive range
+src/codec/japanese.rs:551:47: warning: `...` range patterns are deprecated: help: use `..=` for an inclusive range
+src/codec/japanese.rs:551:60: warning: `...` range patterns are deprecated: help: use `..=` for an inclusive range
+src/codec/japanese.rs:561:22: warning: `...` range patterns are deprecated: help: use `..=` for an inclusive range
+src/codec/japanese.rs:562:22: warning: `...` range patterns are deprecated: help: use `..=` for an inclusive range
+src/codec/japanese.rs:563:22: warning: `...` range patterns are deprecated: help: use `..=` for an inclusive range
+src/codec/japanese.rs:563:39: warning: `...` range patterns are deprecated: help: use `..=` for an inclusive range
+src/codec/japanese.rs:818:24: warning: `...` range patterns are deprecated: help: use `..=` for an inclusive range
+src/codec/japanese.rs:821:27: warning: `...` range patterns are deprecated: help: use `..=` for an inclusive range
+src/codec/japanese.rs:890:18: warning: `...` range patterns are deprecated: help: use `..=` for an inclusive range
+src/codec/japanese.rs:890:31: warning: `...` range patterns are deprecated: help: use `..=` for an inclusive range
+src/codec/japanese.rs:902:18: warning: `...` range patterns are deprecated: help: use `..=` for an inclusive range
+src/codec/japanese.rs:902:31: warning: `...` range patterns are deprecated: help: use `..=` for an inclusive range
+src/codec/japanese.rs:912:22: warning: `...` range patterns are deprecated: help: use `..=` for an inclusive range
+src/codec/japanese.rs:937:22: warning: `...` range patterns are deprecated: help: use `..=` for an inclusive range
+src/codec/simpchinese.rs:191:18: warning: `...` range patterns are deprecated: help: use `..=` for an inclusive range
+src/codec/simpchinese.rs:191:31: warning: `...` range patterns are deprecated: help: use `..=` for an inclusive range
+src/codec/simpchinese.rs:191:47: warning: `...` range patterns are deprecated: help: use `..=` for an inclusive range
+src/codec/simpchinese.rs:191:60: warning: `...` range patterns are deprecated: help: use `..=` for an inclusive range
+src/codec/simpchinese.rs:212:22: warning: `...` range patterns are deprecated: help: use `..=` for an inclusive range
+src/codec/simpchinese.rs:214:22: warning: `...` range patterns are deprecated: help: use `..=` for an inclusive range
+src/codec/simpchinese.rs:221:22: warning: `...` range patterns are deprecated: help: use `..=` for an inclusive range
+src/codec/simpchinese.rs:230:22: warning: `...` range patterns are deprecated: help: use `..=` for an inclusive range
+src/codec/simpchinese.rs:236:22: warning: `...` range patterns are deprecated: help: use `..=` for an inclusive range
+src/codec/simpchinese.rs:573:18: warning: `...` range patterns are deprecated: help: use `..=` for an inclusive range
+src/codec/simpchinese.rs:573:31: warning: `...` range patterns are deprecated: help: use `..=` for an inclusive range
+src/codec/simpchinese.rs:583:22: warning: `...` range patterns are deprecated: help: use `..=` for an inclusive range
+src/codec/simpchinese.rs:592:22: warning: `...` range patterns are deprecated: help: use `..=` for an inclusive range
+src/codec/tradchinese.rs:116:18: warning: `...` range patterns are deprecated: help: use `..=` for an inclusive range
+src/codec/tradchinese.rs:116:31: warning: `...` range patterns are deprecated: help: use `..=` for an inclusive range
+src/codec/tradchinese.rs:116:47: warning: `...` range patterns are deprecated: help: use `..=` for an inclusive range
+src/codec/tradchinese.rs:116:60: warning: `...` range patterns are deprecated: help: use `..=` for an inclusive range
+src/codec/tradchinese.rs:128:22: warning: `...` range patterns are deprecated: help: use `..=` for an inclusive range
+src/codec/tradchinese.rs:129:22: warning: `...` range patterns are deprecated: help: use `..=` for an inclusive range
+src/label.rs:15:44: warning: `...` range patterns are deprecated: help: use `..=` for an inclusive range
+src/util.rs:60:26: warning: trait objects without an explicit `dyn` are deprecated
+src/util.rs:232:74: warning: trait objects without an explicit `dyn` are deprecated
+src/util.rs:274:62: warning: trait objects without an explicit `dyn` are deprecated
+src/util.rs:72:48: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/utf_16.rs:52:57: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/utf_16.rs:127:58: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/error.rs:16:34: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/error.rs:17:34: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/error.rs:29:32: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/error.rs:31:55: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/error.rs:40:44: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/error.rs:54:32: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/error.rs:57:45: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/error.rs:65:44: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/ascii.rs:22:34: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/ascii.rs:23:34: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/ascii.rs:35:32: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/ascii.rs:38:54: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/ascii.rs:56:44: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/ascii.rs:70:32: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/ascii.rs:73:55: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/ascii.rs:94:44: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/ascii.rs:76:43: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/singlebyte.rs:23:34: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/singlebyte.rs:24:34: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/singlebyte.rs:40:32: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/singlebyte.rs:43:54: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/singlebyte.rs:64:44: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/singlebyte.rs:82:32: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/singlebyte.rs:85:55: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/singlebyte.rs:108:44: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/utf_8.rs:52:34: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/utf_8.rs:53:34: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/utf_8.rs:65:32: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/utf_8.rs:68:54: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/utf_8.rs:75:44: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/utf_8.rs:142:32: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/utf_8.rs:145:55: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/utf_8.rs:197:44: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/utf_8.rs:148:37: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/utf_16.rs:25:34: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/utf_16.rs:26:34: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/utf_16.rs:43:34: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/utf_16.rs:44:34: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/utf_16.rs:86:32: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/utf_16.rs:87:54: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/utf_16.rs:93:44: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/utf_16.rs:105:32: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/utf_16.rs:106:54: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/utf_16.rs:112:44: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/utf_16.rs:273:32: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/utf_16.rs:274:55: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/utf_16.rs:277:43: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/utf_16.rs:295:32: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/utf_16.rs:296:55: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/utf_16.rs:299:43: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/korean.rs:30:34: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/korean.rs:31:34: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/korean.rs:43:32: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/korean.rs:46:54: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/korean.rs:67:44: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/korean.rs:85:32: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/korean.rs:88:55: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/korean.rs:94:43: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/japanese.rs:35:34: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/japanese.rs:36:34: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/japanese.rs:48:32: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/japanese.rs:51:54: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/japanese.rs:81:44: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/japanese.rs:99:32: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/japanese.rs:102:55: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/japanese.rs:108:43: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/japanese.rs:455:34: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/japanese.rs:456:34: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/japanese.rs:468:32: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/japanese.rs:471:54: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/japanese.rs:503:44: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/japanese.rs:521:32: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/japanese.rs:524:55: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/japanese.rs:530:43: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/japanese.rs:777:34: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/japanese.rs:778:34: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/japanese.rs:799:32: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/japanese.rs:802:54: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/japanese.rs:847:44: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/japanese.rs:865:32: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/japanese.rs:868:55: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/japanese.rs:874:43: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/simpchinese.rs:43:34: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/simpchinese.rs:44:34: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/simpchinese.rs:56:32: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/simpchinese.rs:58:54: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/simpchinese.rs:61:44: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/simpchinese.rs:87:34: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/simpchinese.rs:88:34: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/simpchinese.rs:100:32: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/simpchinese.rs:102:54: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/simpchinese.rs:105:44: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/simpchinese.rs:166:32: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/simpchinese.rs:169:55: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/simpchinese.rs:175:43: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/simpchinese.rs:468:34: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/simpchinese.rs:469:34: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/simpchinese.rs:483:32: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/simpchinese.rs:486:54: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/simpchinese.rs:530:44: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/simpchinese.rs:548:32: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/simpchinese.rs:551:55: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/simpchinese.rs:557:43: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/tradchinese.rs:33:34: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/tradchinese.rs:34:34: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/tradchinese.rs:46:32: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/tradchinese.rs:49:54: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/tradchinese.rs:73:44: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/tradchinese.rs:91:32: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/tradchinese.rs:94:55: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/tradchinese.rs:100:43: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/whatwg.rs:18:34: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/whatwg.rs:19:34: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/error.rs:25:25: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/error.rs:50:25: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/ascii.rs:31:25: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/ascii.rs:66:25: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/singlebyte.rs:34:68: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/singlebyte.rs:76:67: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/utf_8.rs:61:25: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/utf_8.rs:89:25: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/utf_16.rs:54:30: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/utf_16.rs:82:21: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/utf_16.rs:101:21: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/utf_16.rs:247:44: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/utf_16.rs:267:25: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/utf_16.rs:289:25: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/korean.rs:39:25: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/korean.rs:79:25: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/japanese.rs:44:25: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/japanese.rs:93:25: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/japanese.rs:464:25: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/japanese.rs:515:25: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/japanese.rs:795:25: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/japanese.rs:859:25: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/simpchinese.rs:52:25: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/simpchinese.rs:96:25: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/simpchinese.rs:113:54: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/simpchinese.rs:160:25: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/simpchinese.rs:479:25: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/simpchinese.rs:542:25: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/tradchinese.rs:42:25: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/tradchinese.rs:85:25: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/utf_16.rs:88:60: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/utf_16.rs:107:60: warning: trait objects without an explicit `dyn` are deprecated
+src/codec/utf_16.rs:70:17: warning: unreachable pattern: no value can reach this
+src/util.rs:64:9: warning: field `data` is never read
+src/util.rs:16:14: warning: unnecessary transmute
+src/util.rs:99:40: warning: unnecessary transmute

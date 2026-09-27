@@ -1,0 +1,8 @@
+src/dfa/dense.rs:5072:56: warning: use of deprecated constant `core::isize::MAX`: replaced by the `MAX` associated constant on this type
+src/nfa/thompson/pikevm.rs:1241:51: warning: use of deprecated constant `core::usize::MAX`: replaced by the `MAX` associated constant on this type
+src/nfa/thompson/pikevm.rs:1416:51: warning: use of deprecated constant `core::usize::MAX`: replaced by the `MAX` associated constant on this type
+src/util/primitives.rs:151:46: warning: use of deprecated constant `core::i32::MAX`: replaced by the `MAX` associated constant on this type
+src/util/alphabet.rs:472:21: warning: hiding a lifetime that's elided elsewhere is confusing: the lifetime is elided here, the same lifetime is hidden here
+src/util/alphabet.rs:480:23: warning: hiding a lifetime that's elided elsewhere is confusing: the lifetime is elided here, the same lifetime is hidden here
+src/util/alphabet.rs:789:24: warning: hiding a lifetime that's elided elsewhere is confusing: the lifetime is elided here, the same lifetime is hidden here
+src/util/alphabet.rs:794:31: warning: hiding a lifetime that's elided elsewhere is confusing: the lifetime is elided here, the same lifetime is hidden here

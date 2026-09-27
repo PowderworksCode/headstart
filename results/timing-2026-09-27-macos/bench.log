@@ -1,0 +1,256 @@
+cargo-0.87.1 off #1: 33.67s (exit 0)
+cargo-0.87.1 on #1: 29.60s (exit 0)
+cargo-0.87.1 off #2: 31.33s (exit 0)
+cargo-0.87.1 on #2: 34.71s (exit 0)
+cargo-0.87.1 off #3: 31.78s (exit 0)
+cargo-0.87.1 on #3: 31.38s (exit 0)
+cargo-0.87.1 off #4: 30.71s (exit 0)
+cargo-0.87.1 on #4: 32.17s (exit 0)
+cargo-0.87.1 off #5: 34.26s (exit 0)
+cargo-0.87.1 on #5: 31.28s (exit 0)
+cargo off #1: 15.86s (exit 0)
+cargo on #1: 11.68s (exit 0)
+cargo off #2: 11.96s (exit 0)
+cargo on #2: 9.93s (exit 0)
+cargo off #3: 11.35s (exit 0)
+cargo on #3: 10.49s (exit 0)
+cargo off #4: 16.74s (exit 0)
+cargo on #4: 14.04s (exit 0)
+cargo off #5: 13.04s (exit 0)
+cargo on #5: 17.75s (exit 0)
+clap_derive-4.5.32 off #1: 4.22s (exit 0)
+clap_derive-4.5.32 on #1: 3.68s (exit 0)
+clap_derive-4.5.32 off #2: 8.94s (exit 0)
+clap_derive-4.5.32 on #2: 11.03s (exit 0)
+clap_derive-4.5.32 off #3: 12.15s (exit 0)
+clap_derive-4.5.32 on #3: 3.09s (exit 0)
+clap_derive-4.5.32 off #4: 10.90s (exit 0)
+clap_derive-4.5.32 on #4: 3.25s (exit 0)
+clap_derive-4.5.32 off #5: 4.74s (exit 0)
+clap_derive-4.5.32 on #5: 5.04s (exit 0)
+cranelift-codegen-0.119.0 off #1: 10.75s (exit 0)
+cranelift-codegen-0.119.0 on #1: 10.00s (exit 0)
+cranelift-codegen-0.119.0 off #2: 10.86s (exit 0)
+cranelift-codegen-0.119.0 on #2: 11.24s (exit 0)
+cranelift-codegen-0.119.0 off #3: 9.51s (exit 0)
+cranelift-codegen-0.119.0 on #3: 9.62s (exit 0)
+cranelift-codegen-0.119.0 off #4: 10.06s (exit 0)
+cranelift-codegen-0.119.0 on #4: 11.16s (exit 0)
+cranelift-codegen-0.119.0 off #5: 11.56s (exit 0)
+cranelift-codegen-0.119.0 on #5: 11.24s (exit 0)
+diesel-2.2.10 off #1: 20.45s (exit 0)
+diesel-2.2.10 on #1: 22.53s (exit 0)
+diesel-2.2.10 off #2: 22.30s (exit 0)
+diesel-2.2.10 on #2: 21.22s (exit 0)
+diesel-2.2.10 off #3: 22.43s (exit 0)
+diesel-2.2.10 on #3: 21.77s (exit 0)
+diesel-2.2.10 off #4: 22.54s (exit 0)
+diesel-2.2.10 on #4: 54.97s (exit 0)
+diesel-2.2.10 off #5: 32.23s (exit 0)
+diesel-2.2.10 on #5: 21.04s (exit 0)
+warning: `package.homepage` is redundant with `package.repository`
+  --> src/types/Cargo.toml:9:12
+   |
+ 9 | homepage = "https://github.com/lifthrasiir/rust-encoding"
+   |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+10 | documentation = "https://lifthrasiir.github.io/rust-encoding/"
+11 | repository = "https://github.com/lifthrasiir/rust-encoding"
+   |              ----------------------------------------------
+   |
+   = note: `cargo::redundant_homepage` is set to `warn` by default
+help: consider removing `package.homepage`
+warning: `package.homepage` is redundant with `package.repository`
+ --> Cargo.toml:7:12
+  |
+7 | homepage = "https://github.com/lifthrasiir/rust-encoding"
+  |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+8 | documentation = "https://lifthrasiir.github.io/rust-encoding/"
+9 | repository = "https://github.com/lifthrasiir/rust-encoding"
+  |              ----------------------------------------------
+  |
+  = note: `cargo::redundant_homepage` is set to `warn` by default
+help: consider removing `package.homepage`
+encoding off #1: 0.71s (exit 0)
+encoding on #1: 0.66s (exit 0)
+encoding off #2: 0.71s (exit 0)
+encoding on #2: 0.73s (exit 0)
+encoding off #3: 0.72s (exit 0)
+encoding on #3: 0.69s (exit 0)
+encoding off #4: 0.74s (exit 0)
+encoding on #4: 0.69s (exit 0)
+encoding off #5: 0.69s (exit 0)
+encoding on #5: 0.67s (exit 0)
+warning: `package.homepage` is redundant with `package.repository`
+  --> Cargo.toml:42:12
+   |
+42 | homepage = "https://github.com/eza-community/eza"
+   |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+46 | repository = "https://github.com/eza-community/eza"
+   |              --------------------------------------
+   |
+   = note: `cargo::redundant_homepage` is set to `warn` by default
+help: consider removing `package.homepage`
+eza-0.21.2 off #1: 16.32s (exit 0)
+eza-0.21.2 on #1: 16.80s (exit 0)
+eza-0.21.2 off #2: 15.51s (exit 0)
+eza-0.21.2 on #2: 17.17s (exit 0)
+eza-0.21.2 off #3: 17.20s (exit 0)
+eza-0.21.2 on #3: 16.13s (exit 0)
+eza-0.21.2 off #4: 21.68s (exit 0)
+eza-0.21.2 on #4: 40.07s (exit 0)
+eza-0.21.2 off #5: 25.11s (exit 0)
+eza-0.21.2 on #5: 19.86s (exit 0)
+html5ever-0.31.0 off #1: 4.99s (exit 0)
+html5ever-0.31.0 on #1: 5.72s (exit 0)
+html5ever-0.31.0 off #2: 5.18s (exit 0)
+html5ever-0.31.0 on #2: 4.95s (exit 0)
+html5ever-0.31.0 off #3: 4.67s (exit 0)
+html5ever-0.31.0 on #3: 4.69s (exit 0)
+html5ever-0.31.0 off #4: 4.25s (exit 0)
+html5ever-0.31.0 on #4: 4.36s (exit 0)
+html5ever-0.31.0 off #5: 4.48s (exit 0)
+html5ever-0.31.0 on #5: 4.05s (exit 0)
+html5ever off #1: 9.52s (exit 0)
+html5ever on #1: 8.75s (exit 0)
+html5ever off #2: 10.33s (exit 0)
+html5ever on #2: 9.71s (exit 0)
+html5ever off #3: 10.20s (exit 0)
+html5ever on #3: 8.53s (exit 0)
+html5ever off #4: 8.93s (exit 0)
+html5ever on #4: 8.31s (exit 0)
+html5ever off #5: 8.50s (exit 0)
+html5ever on #5: 9.17s (exit 0)
+hyper-1.6.0 off #1: 1.21s (exit 0)
+hyper-1.6.0 on #1: 2.05s (exit 0)
+hyper-1.6.0 off #2: 1.33s (exit 0)
+hyper-1.6.0 on #2: 1.08s (exit 0)
+hyper-1.6.0 off #3: 1.15s (exit 0)
+hyper-1.6.0 on #3: 0.98s (exit 0)
+hyper-1.6.0 off #4: 1.12s (exit 0)
+hyper-1.6.0 on #4: 0.90s (exit 0)
+hyper-1.6.0 off #5: 1.12s (exit 0)
+hyper-1.6.0 on #5: 0.85s (exit 0)
+image-0.25.6 off #1: 12.34s (exit 0)
+image-0.25.6 on #1: 9.67s (exit 0)
+image-0.25.6 off #2: 11.91s (exit 0)
+image-0.25.6 on #2: 10.55s (exit 0)
+image-0.25.6 off #3: 11.15s (exit 0)
+image-0.25.6 on #3: 10.26s (exit 0)
+image-0.25.6 off #4: 12.52s (exit 0)
+image-0.25.6 on #4: 10.48s (exit 0)
+image-0.25.6 off #5: 12.14s (exit 0)
+image-0.25.6 on #5: 10.58s (exit 0)
+nalgebra-0.33.0 off #1: 11.92s (exit 0)
+nalgebra-0.33.0 on #1: 9.67s (exit 0)
+nalgebra-0.33.0 off #2: 11.06s (exit 0)
+nalgebra-0.33.0 on #2: 10.29s (exit 0)
+nalgebra-0.33.0 off #3: 10.61s (exit 0)
+nalgebra-0.33.0 on #3: 10.33s (exit 0)
+nalgebra-0.33.0 off #4: 11.68s (exit 0)
+nalgebra-0.33.0 on #4: 11.44s (exit 0)
+nalgebra-0.33.0 off #5: 11.23s (exit 0)
+nalgebra-0.33.0 on #5: 10.96s (exit 0)
+piston-image off #1: 4.39s (exit 0)
+piston-image on #1: 3.46s (exit 0)
+piston-image off #2: 3.08s (exit 0)
+piston-image on #2: 3.52s (exit 0)
+piston-image off #3: 3.19s (exit 0)
+piston-image on #3: 3.24s (exit 0)
+piston-image off #4: 3.46s (exit 0)
+piston-image on #4: 2.93s (exit 0)
+piston-image off #5: 3.65s (exit 0)
+piston-image on #5: 3.01s (exit 0)
+projection-caching off #1: 11.78s (exit 0)
+projection-caching on #1: 10.74s (exit 0)
+projection-caching off #2: 11.48s (exit 0)
+projection-caching on #2: 7.75s (exit 0)
+projection-caching off #3: 13.65s (exit 0)
+projection-caching on #3: 10.01s (exit 0)
+projection-caching off #4: 6.94s (exit 0)
+projection-caching on #4: 11.38s (exit 0)
+projection-caching off #5: 9.80s (exit 0)
+projection-caching on #5: 11.52s (exit 0)
+regex-automata-0.4.8 off #1: 3.49s (exit 0)
+regex-automata-0.4.8 on #1: 2.89s (exit 0)
+regex-automata-0.4.8 off #2: 3.53s (exit 0)
+regex-automata-0.4.8 on #2: 2.59s (exit 0)
+regex-automata-0.4.8 off #3: 3.55s (exit 0)
+regex-automata-0.4.8 on #3: 2.49s (exit 0)
+regex-automata-0.4.8 off #4: 3.08s (exit 0)
+regex-automata-0.4.8 on #4: 2.54s (exit 0)
+regex-automata-0.4.8 off #5: 2.94s (exit 0)
+regex-automata-0.4.8 on #5: 2.43s (exit 0)
+ripgrep-14.1.1 off #1: 4.92s (exit 0)
+ripgrep-14.1.1 on #1: 4.27s (exit 0)
+ripgrep-14.1.1 off #2: 4.63s (exit 0)
+ripgrep-14.1.1 on #2: 4.82s (exit 0)
+ripgrep-14.1.1 off #3: 4.40s (exit 0)
+ripgrep-14.1.1 on #3: 3.68s (exit 0)
+ripgrep-14.1.1 off #4: 4.65s (exit 0)
+ripgrep-14.1.1 on #4: 3.37s (exit 0)
+ripgrep-14.1.1 off #5: 4.68s (exit 0)
+ripgrep-14.1.1 on #5: 4.21s (exit 0)
+serde_derive-1.0.219 off #1: 4.02s (exit 0)
+serde_derive-1.0.219 on #1: 2.50s (exit 0)
+serde_derive-1.0.219 off #2: 2.95s (exit 0)
+serde_derive-1.0.219 on #2: 2.53s (exit 0)
+serde_derive-1.0.219 off #3: 3.57s (exit 0)
+serde_derive-1.0.219 on #3: 2.30s (exit 0)
+serde_derive-1.0.219 off #4: 3.17s (exit 0)
+serde_derive-1.0.219 on #4: 2.23s (exit 0)
+serde_derive-1.0.219 off #5: 3.22s (exit 0)
+serde_derive-1.0.219 on #5: 2.07s (exit 0)
+tt-muncher off #1: 2.14s (exit 0)
+tt-muncher on #1: 1.11s (exit 0)
+tt-muncher off #2: 1.38s (exit 0)
+tt-muncher on #2: 1.33s (exit 0)
+tt-muncher off #3: 1.25s (exit 0)
+tt-muncher on #3: 0.98s (exit 0)
+tt-muncher off #4: 1.52s (exit 0)
+tt-muncher on #4: 1.23s (exit 0)
+tt-muncher off #5: 1.47s (exit 0)
+tt-muncher on #5: 1.07s (exit 0)
+unicode-normalization-0.1.24 off #1: 1.13s (exit 0)
+unicode-normalization-0.1.24 on #1: 0.86s (exit 0)
+unicode-normalization-0.1.24 off #2: 1.15s (exit 0)
+unicode-normalization-0.1.24 on #2: 0.84s (exit 0)
+unicode-normalization-0.1.24 off #3: 1.16s (exit 0)
+unicode-normalization-0.1.24 on #3: 0.88s (exit 0)
+unicode-normalization-0.1.24 off #4: 1.20s (exit 0)
+unicode-normalization-0.1.24 on #4: 0.86s (exit 0)
+unicode-normalization-0.1.24 off #5: 1.19s (exit 0)
+unicode-normalization-0.1.24 on #5: 0.85s (exit 0)
+wg-grammar off #1: 5.90s (exit 0)
+wg-grammar on #1: 5.45s (exit 0)
+wg-grammar off #2: 5.80s (exit 0)
+wg-grammar on #2: 5.65s (exit 0)
+wg-grammar off #3: 5.84s (exit 0)
+wg-grammar on #3: 5.60s (exit 0)
+wg-grammar off #4: 6.62s (exit 0)
+wg-grammar on #4: 5.74s (exit 0)
+wg-grammar off #5: 6.93s (exit 0)
+wg-grammar on #5: 6.64s (exit 0)
+
+| project | today (median) | headstart (median) | saved | runs |
+|---|--:|--:|--:|--:|
+| cargo-0.87.1 | 31.78 s | 31.38 s | 1% | 5 |
+| cargo | 13.04 s | 11.68 s | 10% | 5 |
+| clap_derive-4.5.32 | 8.94 s | 3.68 s | 59% | 5 |
+| cranelift-codegen-0.119.0 | 10.75 s | 11.16 s | -4% | 5 |
+| diesel-2.2.10 | 22.43 s | 21.77 s | 3% | 5 |
+| encoding | 0.71 s | 0.69 s | 3% | 5 |
+| eza-0.21.2 | 17.20 s | 17.17 s | 0% | 5 |
+| html5ever-0.31.0 | 4.67 s | 4.69 s | -0% | 5 |
+| html5ever | 9.52 s | 8.75 s | 8% | 5 |
+| hyper-1.6.0 | 1.15 s | 0.98 s | 15% | 5 |
+| image-0.25.6 | 12.14 s | 10.48 s | 14% | 5 |
+| nalgebra-0.33.0 | 11.23 s | 10.33 s | 8% | 5 |
+| piston-image | 3.46 s | 3.24 s | 6% | 5 |
+| projection-caching | 11.48 s | 10.74 s | 6% | 5 |
+| regex-automata-0.4.8 | 3.49 s | 2.54 s | 27% | 5 |
+| ripgrep-14.1.1 | 4.65 s | 4.21 s | 9% | 5 |
+| serde_derive-1.0.219 | 3.22 s | 2.30 s | 29% | 5 |
+| tt-muncher | 1.47 s | 1.11 s | 24% | 5 |
+| unicode-normalization-0.1.24 | 1.16 s | 0.86 s | 26% | 5 |
+| wg-grammar | 5.90 s | 5.65 s | 4% | 5 |

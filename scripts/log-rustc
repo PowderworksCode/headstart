@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# RUSTC_WRAPPER that appends "<crate> <start> <end>" (seconds) to
+# $HEADSTART_LOG for each rustc run, to see when dependents start.
+rustc="$1"; shift
+crate=?
+prev=
+for a in "$@"; do [ "$prev" = --crate-name ] && crate=$a; prev=$a; done
+now() { perl -MTime::HiRes=time -e 'printf "%.3f", time'; }
+start=$(now)
+"$rustc" "$@"
+status=$?
+[ -n "${HEADSTART_LOG:-}" ] && [ "$crate" != "?" ] && echo "$crate $start $(now)" >> "$HEADSTART_LOG"
+exit $status

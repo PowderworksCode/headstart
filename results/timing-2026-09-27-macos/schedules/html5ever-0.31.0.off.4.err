@@ -1,0 +1,5 @@
+src/tokenizer/mod.rs:531:19: warning: hiding a lifetime that's elided elsewhere is confusing: the lifetime is elided here, the same lifetime is hidden here
+src/tree_builder/mod.rs:669:21: warning: hiding a lifetime that's elided elsewhere is confusing: the lifetime is elided here, the same lifetime is hidden here
+src/tree_builder/mod.rs:675:30: warning: hiding a lifetime that's elided elsewhere is confusing: the lifetime is elided here, the same lifetime is hidden here
+src/tree_builder/mod.rs:987:18: warning: hiding a lifetime that's elided elsewhere is confusing: the lifetime is elided here, the same lifetime is hidden here
+src/tree_builder/mod.rs:992:18: warning: hiding a lifetime that's elided elsewhere is confusing: the lifetime is elided here, the same lifetime is hidden here
