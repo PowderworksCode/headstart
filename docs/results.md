@@ -4,8 +4,7 @@ All numbers are clean `cargo check` builds of rustc-perf benchmarks
 (`rustc/src/tools/rustc-perf/collector/compile-benchmarks`), taken with
 `scripts/bench.sh`. Each run alternates headstart off and on, using the
 same patched rustc and cargo. With headstart off, both behave like
-upstream. The tables give medians. The raw runs, the per-rustc schedules
-and the diagnostics are in [`results/`](../results).
+upstream. The tables give medians.
 
 ## Correctness
 
@@ -151,11 +150,9 @@ has no cross-compilation target installed.
 
 ## Timing: Linux, AMD EPYC 9554P, 16 jobs, 5 runs
 
-These runs started once the VM was idle (load average 0.57)
-([raw runs](../results/timing-2026-09-27-linux-v2/runs.tsv)). They use
+These runs started once the VM was idle (load average 0.57). They use
 the current patches, which include two fixes that made an earlier Linux
-run ([raw runs](../results/timing-2026-09-27-linux/runs.tsv)) understate
-headstart:
+run understate headstart:
 
 - **Binaries waited for their whole dependency tree.** Cargo made a
   check-mode binary wait for the full check of every transitive
@@ -200,7 +197,7 @@ headstart:
 
 These runs sample the total resident memory of all rustc processes every
 100 ms during clean `cargo check` builds, on Linux with 16 jobs, median
-of 3 ([raw runs](../results/memory-2026-09-27-linux/runs.tsv)):
+of 3:
 
 | project | peak today | peak with headstart | change | time today | time with headstart |
 |---|--:|--:|--:|--:|--:|
@@ -229,8 +226,7 @@ threads.
 
 These builds interleave four configurations in one session, on Linux
 with 16 jobs: plain; headstart; `RUSTFLAGS=-Zthreads=8`; and both. Each
-is a clean `cargo check`, median of 3, with the min–max in brackets
-([raw runs](../results/fourway-2026-09-27-linux/runs.tsv)):
+is a clean `cargo check`, median of 3, with the min–max in brackets:
 
 | project | plain | headstart | `-Zthreads=8` | `-Zthreads=8` + headstart |
 |---|--:|--:|--:|--:|
@@ -262,8 +258,7 @@ ships, headstart's value is the last column against the third.
 
 These runs edit one function body in cargo's own workspace, then run an
 incremental `cargo check`, with a warm target directory per mode. Each
-number is the median of 5 edits on Linux with 16 jobs
-([raw runs](../results/incremental-2026-09-27-linux/runs.tsv)):
+number is the median of 5 edits on Linux with 16 jobs:
 
 | edited file | today | headstart | saved |
 |---|--:|--:|--:|

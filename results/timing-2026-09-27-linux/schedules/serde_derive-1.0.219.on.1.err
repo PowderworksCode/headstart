@@ -1,3 +1,0 @@
-src/internals/attr.rs:612:23: warning: hiding a lifetime that's elided elsewhere is confusing: the lifetime is elided here, the same lifetime is hidden here
-src/internals/case.rs:45:37: warning: hiding a lifetime that's elided elsewhere is confusing: the lifetime is elided here, the same lifetime is hidden here
-src/de.rs:3228:13: warning: hiding a lifetime that's elided elsewhere is confusing: the lifetime is elided here, the same lifetime is hidden here, the same lifetime is hidden here, the same lifetime is hidden here, the same lifetime is elided here

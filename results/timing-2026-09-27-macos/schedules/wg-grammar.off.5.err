@@ -1,5 +1,0 @@
-src/parse.rs:190:17: warning: unused variable: `parser`: help: if this is intentional, prefix it with an underscore: `_parser`
-src/parse.rs:254:17: warning: unused variable: `parser`: help: if this is intentional, prefix it with an underscore: `_parser`
-src/parse.rs:318:17: warning: unused variable: `parser`: help: if this is intentional, prefix it with an underscore: `_parser`
-src/parse.rs:382:17: warning: unused variable: `parser`: help: if this is intentional, prefix it with an underscore: `_parser`
-src/parse.rs:446:17: warning: unused variable: `parser`: help: if this is intentional, prefix it with an underscore: `_parser`
