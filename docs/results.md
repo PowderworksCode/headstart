@@ -221,35 +221,42 @@ of 3 ([raw runs](../results/memory-2026-09-27-linux/runs.tsv)):
 
 ## With the parallel front end (`-Zthreads=8`)
 
-The parallel front end type-checks a crate's bodies on several threads.
-It uses the same idle cores headstart does, so the question is what's
-left for headstart. These are clean `cargo check` builds with
-`RUSTFLAGS=-Zthreads=8` in both modes, on Linux with 16 jobs, median of 3
-([raw runs](../results/threads8-2026-09-27-linux/runs.tsv)):
+The parallel front end spreads a crate's type-checking, borrow-checking
+and other analysis over up to 8 threads inside one rustc process. Those
+threads take tokens from cargo's jobserver, so with `-j16` the whole
+build still runs at most 16 things at once, whether they're processes or
+threads.
 
-| project | `-Zthreads=8` | + headstart | saved | headstart alone |
+These builds interleave four configurations in one session, on Linux
+with 16 jobs: plain; headstart; `RUSTFLAGS=-Zthreads=8`; and both. Each
+is a clean `cargo check`, median of 3, with the min–max in brackets
+([raw runs](../results/fourway-2026-09-27-linux/runs.tsv)):
+
+| project | plain | headstart | `-Zthreads=8` | `-Zthreads=8` + headstart |
 |---|--:|--:|--:|--:|
-| ripgrep-14.1.1 | 4.52 s | 3.49 s | 23% | 47% |
-| hyper-1.6.0 | 1.25 s | 1.00 s | 20% | 26% |
-| serde_derive-1.0.219 | 2.77 s | 2.24 s | 19% | 36% |
-| eza-0.21.2 | 15.72 s | 14.79 s | 6% | 26% |
-| image-0.25.6 | 9.26 s | 9.15 s | 1% | 21% |
-| regex-automata-0.4.8 | 2.65 s | 2.68 s | −1% | 21% |
-| cargo-0.87.1 | 29.38 s | 30.39 s | −3% | 21% |
+| cargo-0.87.1 | 52.54 s (51.42–53.05) | 42.16 s (42.13–43.06) | 30.23 s (29.89–30.75) | 28.79 s (28.05–29.10) |
+| eza-0.21.2 | 27.61 s (26.77–27.88) | 19.81 s (19.67–19.84) | 14.64 s (14.33–14.80) | 14.31 s (14.16–14.37) |
+| image-0.25.6 | 19.47 s (19.20–19.76) | 15.82 s (15.69–16.37) | 9.33 s (9.16–9.49) | 9.06 s (8.98–9.90) |
+| ripgrep-14.1.1 | 10.31 s (10.23–10.66) | 5.64 s (5.58–5.81) | 4.24 s (4.01–4.31) | 3.32 s (3.25–3.36) |
+| regex-automata-0.4.8 | 7.06 s (7.01–7.17) | 5.59 s (5.55–5.70) | 2.55 s (2.48–2.73) | 2.64 s (2.63–2.72) |
+| serde_derive-1.0.219 | 5.69 s (5.62–6.14) | 3.65 s (3.61–3.67) | 2.50 s (2.50–2.66) | 2.07 s (2.07–2.09) |
+| hyper-1.6.0 | 2.48 s (2.47–2.60) | 1.83 s (1.81–1.85) | 1.07 s (1.03–1.07) | 0.87 s (0.86–0.96) |
 
-The two overlap:
-
-- **The parallel front end is the bigger win on large builds.** On its
-  own it takes cargo-0.87.1 from about 50 s to 29 s. Headstart on its own
-  takes it to 39 s.
-- **Together, headstart still helps medium builds** with dependency
-  chains: ripgrep, hyper, serde_derive. It adds nothing to builds the
-  parallel front end already saturates.
-- **They work together correctly:** diagnostics matched in every run.
+- **The parallel front end alone is the bigger win everywhere:** 42–64%
+  faster than plain, where headstart alone is 20–45%.
+- **On top of it, headstart helps chain-shaped builds most:** ripgrep
+  saves 0.92 s (22%), hyper 0.20 s (19%) and serde_derive 0.43 s (17%).
+  The large builds gain a little: cargo-0.87.1 1.44 s (5%), image 0.27 s
+  (3%), eza 0.33 s (2%). These ranges don't overlap the `-Zthreads=8`
+  ones.
+- **regex-automata gets 0.09 s (4%) slower** with both, likely the early
+  write's cost where the parallel front end has already removed the wait.
+- An earlier, separate 3-run session showed cargo-0.87.1 3% slower with
+  both. Interleaved, it's 5% faster. At this size, the combination is
+  within a few percent either way.
 
 The parallel front end is still nightly-only and off by default. Once it
-ships, headstart's value is the remainder in this table, not the tables
-above.
+ships, headstart's value is the last column against the third.
 
 ## Incremental edit loop
 
