@@ -3,3 +3,4 @@
 /tests/smoke/target/
 /tests/smoke/Cargo.lock
 rustc-ice-*.txt
+/tests/errors/target/
