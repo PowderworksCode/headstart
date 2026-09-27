@@ -1,0 +1,2 @@
+src/base/alias_slice.rs:4:5: warning: unused import: `crate::slice_deprecation_note`
+src/geometry/rotation_specialization.rs:103:31: warning: use of deprecated associated function `core::num::<impl usize>::max_value`: replaced by the `MAX` associated constant on this type

@@ -49,6 +49,42 @@ after bodies are checked:
 rustc's UI suite passes with the patch applied and the flag off:
 21967 passed, 0 failed, 421 ignored.
 
+## Timing: Linux, AMD EPYC 9554P, 16 jobs, 5 runs
+
+This is the cleanest measurement. The runs started once the VM was idle
+(load average 0.35) and ended at a load of about 3.5. In most rows, every
+run with headstart was faster than every run without it
+([raw runs](../results/timing-2026-09-27-linux/runs.tsv)).
+
+| project | today | headstart | saved |
+|---|--:|--:|--:|
+| serde_derive-1.0.219 | 5.99 s | 3.87 s | 35% |
+| ripgrep-14.1.1 | 10.73 s | 7.50 s | 30% |
+| clap_derive-4.5.32 | 5.94 s | 4.17 s | 30% |
+| hyper-1.6.0 | 2.58 s | 1.93 s | 25% |
+| unicode-normalization-0.1.24 | 1.98 s | 1.49 s | 25% |
+| piston-image | 6.25 s | 4.82 s | 23% |
+| eza-0.21.2 | 28.25 s | 23.19 s | 18% |
+| cargo (old) | 21.11 s | 17.47 s | 17% |
+| cargo-0.87.1 | 51.29 s | 43.24 s | 16% |
+| nalgebra-0.33.0 | 23.34 s | 19.66 s | 16% |
+| regex-automata-0.4.8 | 6.89 s | 5.80 s | 16% |
+| syn-2.0.101 | 3.71 s | 3.19 s | 14% |
+| tt-muncher | 1.79 s | 1.54 s | 14% |
+| image-0.25.6 | 20.04 s | 17.46 s | 13% |
+| encoding | 1.17 s | 1.10 s | 6% |
+| wg-grammar | 10.19 s | 9.53 s | 6% |
+| cranelift-codegen-0.119.0 | 20.21 s | 19.78 s | 2% |
+| projection-caching | 11.56 s | 11.34 s | 2% |
+| diesel-2.2.10 | 39.90 s | 39.43 s | 1% |
+| html5ever-0.31.0 | 7.72 s | 7.75 s | 0% |
+| html5ever | 17.02 s | 17.14 s | −1% |
+
+Nothing got meaningfully slower. The large multi-crate builds that were
+flat on the 12-core Mac gain here: cargo-0.87.1 by 16% and eza by 18%.
+With more cores, there's idle capacity for the crates headstart starts
+early.
+
 ## Timing: Apple M2 Max, 12 jobs, 5 runs
 
 | project | today | headstart | saved |
@@ -82,10 +118,10 @@ with headstart on.
 
 ## Where it doesn't help
 
-- **CPU-bound builds.** cargo-0.87.1 has about 211 s of rustc work on 12
-  cores, and the cores are busy almost until the last crate starts.
-  Starting crates earlier can't help when there's no idle core to run
-  them on.
+- **CPU-bound builds.** cargo-0.87.1 has about 211 s of rustc work. On
+  the 12-core Mac, the cores are busy almost until the last crate starts,
+  and headstart saves 1%. On 16 cores it saves 16%. Starting crates
+  earlier helps only when there's an idle core to run them on.
 - **Build scripts and proc macros.** Build scripts, and C code compiled
   from them, are full builds and gain nothing. The same holds for proc
   macros (syn → serde_derive → ...). In cargo-0.87.1, the libgit2 C build

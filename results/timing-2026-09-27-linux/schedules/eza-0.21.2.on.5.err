@@ -1,0 +1,28 @@
+warning: `package.homepage` is redundant with `package.repository`
+  --> Cargo.toml:42:12
+   |
+42 | homepage = "https://github.com/eza-community/eza"
+   |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+46 | repository = "https://github.com/eza-community/eza"
+   |              --------------------------------------
+   |
+   = note: `cargo::redundant_homepage` is set to `warn` by default
+help: consider removing `package.homepage`
+src/fs/fields.rs:35:10: warning: type alias `time_t` is never used
+src/fs/fields.rs:210:12: warning: struct `Time` is never constructed
+warning: unused dependency `backtrace`
+   --> Cargo.toml:120:15
+    |
+120 | [dependencies.backtrace]
+    |               ^^^^^^^^^^
+    |
+    = note: `cargo::unused_dependencies` is set to `warn` by default
+help: consider removing the dependency on `backtrace`
+warning: unused dependency `zoneinfo_compiled`
+   --> Cargo.toml:203:15
+    |
+203 | [dependencies.zoneinfo_compiled]
+    |               ^^^^^^^^^^^^^^^^^^
+    |
+help: consider removing the dependency on `zoneinfo_compiled`

@@ -1,0 +1,85 @@
+tendril-0.2.4-patched/src/stream.rs:94:29: warning: use of deprecated macro `try`: use the `?` operator instead
+tendril-0.2.4-patched/src/tendril.rs:489:9: warning: use of deprecated macro `try`: use the `?` operator instead
+tendril-0.2.4-patched/src/tendril.rs:490:9: warning: use of deprecated macro `try`: use the `?` operator instead
+tendril-0.2.4-patched/src/fmt.rs:357:43: warning: use of deprecated function `std::mem::uninitialized`: use `mem::MaybeUninit` instead
+tendril-0.2.4-patched/src/fmt.rs:447:40: warning: use of deprecated function `std::mem::uninitialized`: use `mem::MaybeUninit` instead
+tendril-0.2.4-patched/src/buf32.rs:9:21: warning: use of deprecated module `std::u32`: all constants in this module replaced by associated constants on the type
+tendril-0.2.4-patched/src/buf32.rs:15:33: warning: use of deprecated constant `std::u32::MAX`: replaced by the `MAX` associated constant on this type
+tendril-0.2.4-patched/src/tendril.rs:7:32: warning: use of deprecated module `std::u32`: all constants in this module replaced by associated constants on the type
+tendril-0.2.4-patched/src/tendril.rs:147:23: warning: use of deprecated function `std::mem::uninitialized`: use `mem::MaybeUninit` instead
+tendril-0.2.4-patched/src/tendril.rs:888:54: warning: use of deprecated function `std::mem::uninitialized`: use `mem::MaybeUninit` instead
+tendril-0.2.4-patched/src/tendril.rs:1020:23: warning: use of deprecated function `std::mem::uninitialized`: use `mem::MaybeUninit` instead
+tendril-0.2.4-patched/src/tendril.rs:1021:23: warning: use of deprecated function `std::mem::uninitialized`: use `mem::MaybeUninit` instead
+tendril-0.2.4-patched/src/tendril.rs:1350:36: warning: use of deprecated constant `std::u32::MAX`: replaced by the `MAX` associated constant on this type
+tendril-0.2.4-patched/src/tendril.rs:1434:36: warning: use of deprecated constant `std::u32::MAX`: replaced by the `MAX` associated constant on this type
+tendril-0.2.4-patched/src/tendril.rs:1457:43: warning: use of deprecated function `std::mem::uninitialized`: use `mem::MaybeUninit` instead
+tendril-0.2.4-patched/src/stream.rs:192:15: warning: trait objects without an explicit `dyn` are deprecated
+tendril-0.2.4-patched/src/fmt.rs:357:38: warning: the type `[u8; 4]` does not permit being left uninitialized: this code causes undefined behavior when executed, help: use `MaybeUninit<T>` instead, and only call `assume_init` after initialization is done
+tendril-0.2.4-patched/src/fmt.rs:447:35: warning: the type `[u8; 4]` does not permit being left uninitialized: this code causes undefined behavior when executed, help: use `MaybeUninit<T>` instead, and only call `assume_init` after initialization is done
+tendril-0.2.4-patched/src/fmt.rs:63:9: warning: unnecessary transmute
+tendril-0.2.4-patched/src/tendril.rs:147:18: warning: the type `u32` does not permit being left uninitialized: this code causes undefined behavior when executed, help: use `MaybeUninit<T>` instead, and only call `assume_init` after initialization is done
+tendril-0.2.4-patched/src/tendril.rs:888:49: warning: the type `[u8; 8]` does not permit being left uninitialized: this code causes undefined behavior when executed, help: use `MaybeUninit<T>` instead, and only call `assume_init` after initialization is done
+tendril-0.2.4-patched/src/tendril.rs:1020:18: warning: the type `u32` does not permit being left uninitialized: this code causes undefined behavior when executed, help: use `MaybeUninit<T>` instead, and only call `assume_init` after initialization is done
+tendril-0.2.4-patched/src/tendril.rs:1021:18: warning: the type `Cell<u32>` does not permit being left uninitialized: this code causes undefined behavior when executed, help: use `MaybeUninit<T>` instead, and only call `assume_init` after initialization is done
+tendril-0.2.4-patched/src/tendril.rs:1457:38: warning: the type `[u8; 4]` does not permit being left uninitialized: this code causes undefined behavior when executed, help: use `MaybeUninit<T>` instead, and only call `assume_init` after initialization is done
+build.rs:34:7: warning: unexpected `cfg` condition value: `codegen`
+build.rs:41:11: warning: unexpected `cfg` condition value: `codegen`
+build.rs:67:11: warning: unexpected `cfg` condition value: `codegen`
+build.rs:83:5: warning: use of deprecated macro `try`: use the `?` operator instead
+build.rs:81:23: warning: use of deprecated macro `try`: use the `?` operator instead
+build.rs:85:16: warning: use of deprecated macro `try`: use the `?` operator instead
+build.rs:87:25: warning: use of deprecated macro `try`: use the `?` operator instead
+build.rs:75:22: warning: use of deprecated struct `std::hash::SipHasher`: use `std::hash::DefaultHasher` instead
+build.rs:69:35: warning: use of deprecated struct `std::hash::SipHasher`: use `std::hash::DefaultHasher` instead
+build.rs:75:33: warning: use of deprecated associated function `std::hash::SipHasher::new`: use `std::hash::DefaultHasher` instead
+src/lib.rs:16:13: warning: unexpected `cfg` condition value: `heap_size`
+src/lib.rs:17:13: warning: unexpected `cfg` condition value: `heap_size`
+src/lib.rs:18:7: warning: unexpected `cfg` condition value: `heap_size`
+src/util/str.rs:26:13: warning: `...` range patterns are deprecated: help: use `..=` for an inclusive range
+src/util/str.rs:27:13: warning: `...` range patterns are deprecated: help: use `..=` for an inclusive range
+src/util/str.rs:34:20: warning: `...` range patterns are deprecated: help: use `..=` for an inclusive range
+src/util/str.rs:34:32: warning: `...` range patterns are deprecated: help: use `..=` for an inclusive range
+src/util/str.rs:34:44: warning: `...` range patterns are deprecated: help: use `..=` for an inclusive range
+src/tokenizer/mod.rs:555:7: warning: unexpected `cfg` condition name: `trace_tokenizer`
+src/tokenizer/mod.rs:561:11: warning: unexpected `cfg` condition name: `trace_tokenizer`
+src/tokenizer/char_ref/mod.rs:222:26: warning: `...` range patterns are deprecated: help: use `..=` for an inclusive range
+src/tokenizer/char_ref/mod.rs:224:17: warning: `...` range patterns are deprecated: help: use `..=` for an inclusive range
+src/tokenizer/char_ref/mod.rs:229:17: warning: `...` range patterns are deprecated: help: use `..=` for an inclusive range
+src/tokenizer/char_ref/mod.rs:229:38: warning: `...` range patterns are deprecated: help: use `..=` for an inclusive range
+src/tokenizer/char_ref/mod.rs:229:61: warning: `...` range patterns are deprecated: help: use `..=` for an inclusive range
+src/tokenizer/mod.rs:254:17: warning: `...` range patterns are deprecated: help: use `..=` for an inclusive range
+src/tokenizer/mod.rs:254:38: warning: `...` range patterns are deprecated: help: use `..=` for an inclusive range
+src/tokenizer/mod.rs:254:52: warning: `...` range patterns are deprecated: help: use `..=` for an inclusive range
+src/tokenizer/mod.rs:254:68: warning: `...` range patterns are deprecated: help: use `..=` for an inclusive range
+src/serialize/mod.rs:97:13: warning: use of deprecated macro `try`: use the `?` operator instead
+src/serialize/mod.rs:128:9: warning: use of deprecated macro `try`: use the `?` operator instead
+src/serialize/mod.rs:129:9: warning: use of deprecated macro `try`: use the `?` operator instead
+src/serialize/mod.rs:154:9: warning: use of deprecated macro `try`: use the `?` operator instead
+src/serialize/mod.rs:131:13: warning: use of deprecated macro `try`: use the `?` operator instead
+src/serialize/mod.rs:149:13: warning: use of deprecated macro `try`: use the `?` operator instead
+src/serialize/mod.rs:150:13: warning: use of deprecated macro `try`: use the `?` operator instead
+src/serialize/mod.rs:151:13: warning: use of deprecated macro `try`: use the `?` operator instead
+src/serialize/mod.rs:152:13: warning: use of deprecated macro `try`: use the `?` operator instead
+src/serialize/mod.rs:135:29: warning: use of deprecated macro `try`: use the `?` operator instead
+src/serialize/mod.rs:138:25: warning: use of deprecated macro `try`: use the `?` operator instead
+src/serialize/mod.rs:141:31: warning: use of deprecated macro `try`: use the `?` operator instead
+src/serialize/mod.rs:145:21: warning: use of deprecated macro `try`: use the `?` operator instead
+src/serialize/mod.rs:182:9: warning: use of deprecated macro `try`: use the `?` operator instead
+src/serialize/mod.rs:183:9: warning: use of deprecated macro `try`: use the `?` operator instead
+src/serialize/mod.rs:197:13: warning: use of deprecated macro `try`: use the `?` operator instead
+src/serialize/mod.rs:218:9: warning: use of deprecated macro `try`: use the `?` operator instead
+src/serialize/mod.rs:219:9: warning: use of deprecated macro `try`: use the `?` operator instead
+src/serialize/mod.rs:224:9: warning: use of deprecated macro `try`: use the `?` operator instead
+src/serialize/mod.rs:225:9: warning: use of deprecated macro `try`: use the `?` operator instead
+src/serialize/mod.rs:230:9: warning: use of deprecated macro `try`: use the `?` operator instead
+src/serialize/mod.rs:231:9: warning: use of deprecated macro `try`: use the `?` operator instead
+src/serialize/mod.rs:232:9: warning: use of deprecated macro `try`: use the `?` operator instead
+src/serialize/mod.rs:233:9: warning: use of deprecated macro `try`: use the `?` operator instead
+src/rcdom.rs:348:21: warning: use of deprecated macro `try`: use the `?` operator instead
+src/rcdom.rs:353:21: warning: use of deprecated macro `try`: use the `?` operator instead
+src/rcdom.rs:357:21: warning: use of deprecated macro `try`: use the `?` operator instead
+src/rcdom.rs:364:21: warning: use of deprecated macro `try`: use the `?` operator instead
+src/tokenizer/mod.rs:32:17: warning: use of deprecated trait `std::ascii::AsciiExt`: use inherent methods instead
+src/tokenizer/buffer_queue.rs:12:17: warning: use of deprecated trait `std::ascii::AsciiExt`: use inherent methods instead
+src/rcdom.rs:15:17: warning: use of deprecated trait `std::ascii::AsciiExt`: use inherent methods instead
+src/rcdom.rs:15:5: warning: unused import: `std::ascii::AsciiExt`
