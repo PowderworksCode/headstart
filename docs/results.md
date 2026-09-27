@@ -9,15 +9,9 @@ and the diagnostics are in [`results/`](../results).
 
 ## Correctness
 
-**Linux (x86_64, AMD EPYC, 16 jobs).** The same sweep passes in both
-modes for 52 of 53 benchmarks, including libc, syn and
-tokio-webpush-simple, with identical diagnostics. stm32f4 fails in both
-modes because it needs a device feature. Its build-script panic
-messages differ only in the thread ID.
-
-**macOS (M2 Max).** A sweep over all 53 multi-file benchmarks (the rustc-perf directories
-with a `Cargo.toml`, minus solver and `-nll` variants) built each one
-with headstart off and on:
+**macOS (M2 Max).** A sweep over all 53 multi-file benchmarks (the
+rustc-perf directories with a `Cargo.toml`, minus solver and `-nll`
+variants) built each one with headstart off and on:
 
 - **No ICEs**, and every benchmark's exit status matched between modes.
   Three benchmarks fail in both modes, for reasons unrelated to headstart:
@@ -28,9 +22,15 @@ with headstart off and on:
   - tokio-webpush-simple depends on native-tls 0.1, which doesn't build
     on macOS.
 
-  syn couldn't be fetched offline, so it wasn't run.
+  syn wasn't run: fetching its dependencies needed git authentication.
 - **Same diagnostics.** In the timing runs, the sorted `cargo check`
   output was identical between modes for every benchmark.
+
+**Linux (x86_64, AMD EPYC, 16 jobs).** The same sweep passes in both
+modes for 52 of 53 benchmarks, including libc, syn and
+tokio-webpush-simple, with identical diagnostics. stm32f4 fails in both
+modes because it needs a device feature. Its build-script panic
+messages differ only in the thread ID.
 
 The sweep found four bugs in the first version of the rustc patch. Each
 one was a case where encoding early touched something that only exists
