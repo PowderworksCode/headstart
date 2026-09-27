@@ -55,6 +55,11 @@ three scenarios (a clean build, an error in a dependency, an error in the
 binary) with headstart off and on. It then compares the human-readable
 output, the JSON output and the exit status.
 
+`scripts/check-incremental.sh` does the same across a sequence of
+incremental edits. The steps include adding an `impl Fn` a dependent
+calls, and breaking and then fixing an interface. It also compares the
+final state against a clean build.
+
 ## Benchmarks
 
 ```sh
@@ -62,7 +67,9 @@ scripts/bench.sh -n 5 path/to/project ...
 ```
 
 This times clean `cargo check` builds, alternating headstart off and on,
-and prints the medians. `scripts/log-rustc` records when each rustc run
+and prints the medians. `scripts/bench-mem.sh` measures peak memory the
+same way. `scripts/bench-incremental.sh` times incremental rechecks after
+editing one function body. `scripts/log-rustc` records when each rustc run
 started and ended, so you can see the schedule. The rustc-perf benchmarks
 are under `rustc/src/tools/rustc-perf/collector/compile-benchmarks`
 (`git -C rustc submodule update --init --depth 1 src/tools/rustc-perf`).

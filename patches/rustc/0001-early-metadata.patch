@@ -30,7 +30,7 @@ index dbbf06818..7a54d9683 100644
          let def_kind = tcx.def_kind(item_def_id);
          // Make sure we evaluate all static and (non-associated) const items, even if unused.
 diff --git a/compiler/rustc_interface/src/passes.rs b/compiler/rustc_interface/src/passes.rs
-index da0ebce5b..240d5ca8f 100644
+index da0ebce5b..18af4a9b7 100644
 --- a/compiler/rustc_interface/src/passes.rs
 +++ b/compiler/rustc_interface/src/passes.rs
 @@ -1143,7 +1143,14 @@ fn run_required_analyses(tcx: TyCtxt<'_>) {
@@ -49,7 +49,7 @@ index da0ebce5b..240d5ca8f 100644
      // Freeze definitions as we don't add new ones at this point.
      // We need to wait until now since we synthesize a by-move body
      // for all coroutine-closures.
-@@ -1281,6 +1288,48 @@ fn analysis(tcx: TyCtxt<'_>, (): ()) {
+@@ -1281,6 +1288,50 @@ fn analysis(tcx: TyCtxt<'_>, (): ()) {
      }
  }
  
@@ -88,7 +88,9 @@ index da0ebce5b..240d5ca8f 100644
 +        return;
 +    }
 +    tcx.sess.encoding_early_metadata.store(true, std::sync::atomic::Ordering::Relaxed);
-+    let encoded = rustc_metadata::fs::encode_and_write_metadata(tcx);
++    // Metadata encoding runs outside dependency tracking, as it does after
++    // `analysis`; with incremental compilation it tracks itself as a task.
++    let encoded = tcx.dep_graph.with_ignore(|| rustc_metadata::fs::encode_and_write_metadata(tcx));
 +    tcx.sess.encoding_early_metadata.store(false, std::sync::atomic::Ordering::Relaxed);
 +    if let Ok(metadata) = encoded {
 +        *EARLY_METADATA.lock().unwrap() = Some(metadata);
@@ -98,7 +100,7 @@ index da0ebce5b..240d5ca8f 100644
  /// Runs the codegen backend, after which the AST and analysis can
  /// be discarded.
  pub(crate) fn start_codegen<'tcx>(
-@@ -1311,9 +1360,13 @@ pub(crate) fn start_codegen<'tcx>(
+@@ -1311,9 +1362,13 @@ pub(crate) fn start_codegen<'tcx>(
  
      info!("Pre-codegen\n{:?}", tcx.debug_stats());
  
@@ -116,10 +118,10 @@ index da0ebce5b..240d5ca8f 100644
  
      let is_host_metadata = tcx
 diff --git a/compiler/rustc_metadata/src/rmeta/encoder.rs b/compiler/rustc_metadata/src/rmeta/encoder.rs
-index afa5646be..7eb5e8c04 100644
+index afa5646be..340b78acc 100644
 --- a/compiler/rustc_metadata/src/rmeta/encoder.rs
 +++ b/compiler/rustc_metadata/src/rmeta/encoder.rs
-@@ -6,6 +6,7 @@
+@@ -6,11 +6,12 @@
  use std::ops::Deref;
  use std::path::{Path, PathBuf};
  use std::rc::Rc;
@@ -127,19 +129,27 @@ index afa5646be..7eb5e8c04 100644
  use std::sync::{Arc, Mutex};
  
  use rustc_attr_ir::{AttributeKind, EncodeCrossCrate, find_attr};
-@@ -78,6 +79,11 @@ pub(super) struct EncodeContext<'a, 'tcx> {
+ use rustc_data_structures::fingerprint::Fingerprint;
+-use rustc_data_structures::fx::{FxIndexMap, FxIndexSet};
++use rustc_data_structures::fx::{FxHashSet, FxIndexMap, FxIndexSet};
+ use rustc_data_structures::memmap::{Mmap, MmapMut};
+ use rustc_data_structures::owned_slice::slice_owned;
+ use rustc_data_structures::stable_hash::{StableHash, StableHasher};
+@@ -78,6 +79,13 @@ pub(super) struct EncodeContext<'a, 'tcx> {
      hygiene_ctxt: Rc<RefCell<HygieneEncodeContext>>,
      // Used for both `Symbol`s and `ByteSymbol`s.
      symbol_index_table: FxHashMap<u32, usize>,
 +
-+    // `-Zearly-metadata`: MIR and definitions nested in function bodies that
-+    // aren't type-checked yet, with the body they wait for.
++    // `-Zearly-metadata`: the bodies the crate's interface needs (see
++    // `interface_bodies`), and the MIR and definitions nested in other
++    // bodies, which are left out.
++    interface_bodies: Option<FxHashSet<LocalDefId>>,
 +    deferred_mir: Vec<(LocalDefId, LocalDefId, bool, bool)>,
 +    deferred_defs: Vec<(LocalDefId, LocalDefId)>,
  }
  
  /// If the current crate is a proc-macro, returns early with `LazyArray::default()`.
-@@ -747,7 +753,14 @@ macro_rules! stat {
+@@ -747,7 +755,14 @@ macro_rules! stat {
                  },
  
                  stable_crate_id: tcx.stable_crate_id(LOCAL_CRATE),
@@ -155,7 +165,7 @@ index afa5646be..7eb5e8c04 100644
                  panic_in_drop_strategy: tcx.sess.opts.unstable_opts.panic_in_drop,
                  edition: tcx.sess.edition(),
                  has_global_allocator: tcx.has_global_allocator(LOCAL_CRATE),
-@@ -1457,247 +1470,255 @@ fn encode_def_ids(&mut self) {
+@@ -1457,247 +1472,255 @@ fn encode_def_ids(&mut self) {
          let tcx = self.tcx;
  
          for local_id in tcx.iter_local_def_id() {
@@ -458,7 +468,7 @@ index afa5646be..7eb5e8c04 100644
 -                for &def_id in associated_item_def_ids {
 -                    self.encode_info_for_assoc_item(def_id);
 -                }
--            }
+             }
 -            if let DefKind::Closure | DefKind::SyntheticCoroutineBody = def_kind
 -                && let Some(coroutine_kind) = self.tcx.coroutine_kind(def_id)
 -            {
@@ -496,7 +506,7 @@ index afa5646be..7eb5e8c04 100644
 -                        },
 -                    };
 -                }
-             }
+-            }
 -            if let DefKind::Enum | DefKind::Struct | DefKind::Union = def_kind {
 -                self.encode_info_for_adt(local_id);
 +        }
@@ -632,7 +642,7 @@ index afa5646be..7eb5e8c04 100644
          }
      }
  
-@@ -1859,71 +1880,157 @@ fn encode_precise_capturing_args(&mut self, def_id: DefId) {
+@@ -1859,71 +1882,223 @@ fn encode_precise_capturing_args(&mut self, def_id: DefId) {
          record_array!(self.tables.rendered_precise_capturing_args[def_id] <- precise_capturing_args);
      }
  
@@ -737,6 +747,9 @@ index afa5646be..7eb5e8c04 100644
 -                if let Some((val, ty)) = tcx.trivial_const(def_id) {
 -                    is_trivial = true;
 -                    record!(self.tables.trivial_const[def_id.to_def_id()] <- (val, ty));
+-                } else {
+-                    is_trivial = false;
+-                    record!(self.tables.mir_for_ctfe[def_id.to_def_id()] <- tcx.mir_for_ctfe(def_id));
 +            // Inline consts are type-checked with their parent body.
 +            DefKind::AnonConst if tcx.is_typeck_child(def_id.to_def_id()) => {
 +                return Some(tcx.typeck_root_def_id_local(def_id));
@@ -751,7 +764,14 @@ index afa5646be..7eb5e8c04 100644
 +                | hir::Node::Stmt(_)
 +                | hir::Node::LetStmt(_)
 +                | hir::Node::Pat(_)
-+                | hir::Node::PatExpr(_) => return Some(tcx.hir_enclosing_body_owner(id)),
++                | hir::Node::PatExpr(_) => {
++                    return Some(tcx.typeck_root_def_id_local(tcx.hir_enclosing_body_owner(id)));
+                 }
+-
+-                // FIXME(generic_const_exprs): this feels wrong to have in `encode_mir`
+-                let abstract_const = tcx.thir_abstract_const(def_id);
+-                if let Ok(Some(abstract_const)) = abstract_const {
+-                    record!(self.tables.thir_abstract_const[def_id.to_def_id()] <- abstract_const);
 +                hir::Node::Item(_)
 +                | hir::Node::TraitItem(_)
 +                | hir::Node::ImplItem(_)
@@ -762,25 +782,22 @@ index afa5646be..7eb5e8c04 100644
 +        None
 +    }
 +
-+    /// Encodes the deferred MIR and definitions whose bodies are now
-+    /// type-checked, until encoding one forces no further body.
-+    fn encode_deferred(&mut self) {
-+        loop {
-+            let mut progress = false;
-+            for (def_id, body, c, o) in std::mem::take(&mut self.deferred_mir) {
-+                if self.tcx.typeck_is_done(body) {
-+                    self.encode_mir_for(def_id, c, o);
-+                    progress = true;
-                 } else {
--                    is_trivial = false;
--                    record!(self.tables.mir_for_ctfe[def_id.to_def_id()] <- tcx.mir_for_ctfe(def_id));
--                }
--
--                // FIXME(generic_const_exprs): this feels wrong to have in `encode_mir`
--                let abstract_const = tcx.thir_abstract_const(def_id);
--                if let Ok(Some(abstract_const)) = abstract_const {
--                    record!(self.tables.thir_abstract_const[def_id.to_def_id()] <- abstract_const);
-+                    self.deferred_mir.push((def_id, body, c, o));
++    /// With `-Zearly-metadata`, the bodies whose type-checking the crate's
++    /// interface depends on, as a function of the crate's code alone:
++    ///
++    /// - bodies the encoder records MIR for: consts, const fns, coroutines;
++    /// - statics, which are evaluated before the early write;
++    /// - bodies that define an opaque type's hidden type.
++    ///
++    /// Definitions nested in any other body are left out of early metadata.
++    fn interface_bodies(&mut self) -> &FxHashSet<LocalDefId> {
++        let tcx = self.tcx;
++        if self.interface_bodies.is_none() {
++            let mut bodies = FxHashSet::default();
++            let unreachable = LocalDefIdSet::default();
++            for &def_id in tcx.mir_keys(()) {
++                if self.early_enclosing_body(def_id).is_some() {
++                    continue;
                  }
 -
 -                if should_encode_const(tcx.def_kind(def_id)) {
@@ -790,28 +807,86 @@ index afa5646be..7eb5e8c04 100644
 -                    if let Some(body) = body {
 -                        let const_data = rendered_const(self.tcx, &body, def_id);
 -                        record!(self.tables.rendered_const[def_id.to_def_id()] <- const_data);
--                    }
++                let (encode_const, encode_opt) = should_encode_mir(tcx, &unreachable, def_id);
++                if encode_const || encode_opt {
++                    bodies.insert(tcx.typeck_root_def_id_local(def_id));
++                }
 +            }
-+            for (def_id, body) in std::mem::take(&mut self.deferred_defs) {
-+                if self.tcx.typeck_is_done(body) {
-+                    self.encode_def_id(def_id);
-+                    progress = true;
-+                } else {
-+                    self.deferred_defs.push((def_id, body));
++            let mut type_alias_opaques = FxHashSet::default();
++            let items = tcx.hir_crate_items(());
++            for def_id in items.definitions().chain(items.opaques()) {
++                match tcx.def_kind(def_id) {
++                    DefKind::Static { .. } => {
++                        bodies.insert(def_id);
+                     }
++                    DefKind::OpaqueTy => match tcx.local_opaque_ty_origin(def_id) {
++                        hir::OpaqueTyOrigin::FnReturn { parent, .. }
++                        | hir::OpaqueTyOrigin::AsyncFn { parent, .. } => {
++                            bodies.insert(tcx.typeck_root_def_id_local(parent));
++                        }
++                        hir::OpaqueTyOrigin::TyAlias { .. } => {
++                            type_alias_opaques.insert(def_id);
++                        }
++                    },
++                    _ => {}
                  }
              }
 -            if !is_trivial {
 -                record!(self.tables.promoted_mir[def_id.to_def_id()] <- tcx.promoted_mir(def_id));
-+            if !progress {
-+                break;
++            // A `type Alias = impl Trait` is defined by whichever bodies may
++            // define it.
++            if !type_alias_opaques.is_empty() {
++                for owner in tcx.hir_body_owners() {
++                    if tcx
++                        .opaque_types_defined_by(owner)
++                        .iter()
++                        .any(|opaque| type_alias_opaques.contains(&opaque))
++                    {
++                        bodies.insert(tcx.typeck_root_def_id_local(owner));
++                    }
++                }
              }
++            self.interface_bodies = Some(bodies);
 +        }
++        self.interface_bodies.as_ref().unwrap()
 +    }
  
 -            if self.tcx.is_coroutine(def_id.to_def_id())
 -                && let Some(witnesses) = tcx.mir_coroutine_witnesses(def_id)
 -            {
 -                record!(self.tables.mir_coroutine_witnesses[def_id.to_def_id()] <- witnesses);
++    /// Encodes the deferred MIR and definitions nested in interface bodies.
++    /// With `-Zearly-metadata-verify`, reports any left out whose body was
++    /// type-checked anyway: a body `interface_bodies` should have included.
++    fn encode_deferred(&mut self) {
++        let verify = self.tcx.sess.opts.unstable_opts.early_metadata_verify;
++        for (def_id, body, c, o) in std::mem::take(&mut self.deferred_mir) {
++            if self.interface_bodies().contains(&body) {
++                self.encode_mir_for(def_id, c, o);
++            } else if verify {
++                self.report_missed_body(def_id, body);
++            }
++        }
++        for (def_id, body) in std::mem::take(&mut self.deferred_defs) {
++            if self.interface_bodies().contains(&body) {
++                self.encode_def_id(def_id);
++            } else if verify {
++                self.report_missed_body(def_id, body);
++            }
++        }
++    }
++
++    fn report_missed_body(&self, def_id: LocalDefId, body: LocalDefId) {
++        if self.tcx.typeck_is_done(body) {
++            eprintln!(
++                "early-metadata-verify: left out `{}`, but `{}` was type-checked \
++                 during the early write",
++                self.tcx.def_path_debug_str(def_id.to_def_id()),
++                self.tcx.def_path_debug_str(body.to_def_id()),
++            );
++        }
++    }
++
 +    fn encode_mir(&mut self) {
 +        if self.is_proc_macro {
 +            return;
@@ -841,17 +916,18 @@ index afa5646be..7eb5e8c04 100644
          }
  
          // Encode all the deduced parameter attributes for everything that has MIR, even for items
-@@ -2691,6 +2798,8 @@ fn with_encode_metadata_header(
+@@ -2691,6 +2866,9 @@ fn with_encode_metadata_header(
          is_proc_macro: tcx.crate_types().contains(&CrateType::ProcMacro),
          hygiene_ctxt: Default::default(),
          symbol_index_table: Default::default(),
++        interface_bodies: None,
 +        deferred_mir: Default::default(),
 +        deferred_defs: Default::default(),
      };
  
      // Encode the rustc version string in a predictable location.
 diff --git a/compiler/rustc_middle/src/ty/context.rs b/compiler/rustc_middle/src/ty/context.rs
-index 5cd7322ce..6141638e2 100644
+index 5cd7322ce..13aba4ba6 100644
 --- a/compiler/rustc_middle/src/ty/context.rs
 +++ b/compiler/rustc_middle/src/ty/context.rs
 @@ -1371,7 +1371,7 @@ pub fn create_crate_num(
@@ -863,7 +939,7 @@ index 5cd7322ce..6141638e2 100644
  
          let definitions = &self.untracked.definitions;
          gen {
-@@ -1390,9 +1390,26 @@ pub fn iter_local_def_id(self) -> impl Iterator<Item = LocalDefId> {
+@@ -1390,9 +1390,30 @@ pub fn iter_local_def_id(self) -> impl Iterator<Item = LocalDefId> {
          }
      }
  
@@ -878,8 +954,12 @@ index 5cd7322ce..6141638e2 100644
 +    /// Runs `analysis`, except while `-Zearly-metadata` is encoding metadata
 +    /// from inside it: then every definition the metadata needs already
 +    /// exists (the encoder freezes the table), and waiting would be a cycle.
++    /// Instead, depend on the crate's items, so that incremental compilation
++    /// re-encodes metadata when definitions are added or removed.
 +    fn ensure_analysis_unless_early_metadata(self) {
-+        if !self.sess.encoding_early_metadata.load(std::sync::atomic::Ordering::Relaxed) {
++        if self.sess.encoding_early_metadata.load(std::sync::atomic::Ordering::Relaxed) {
++            self.ensure_ok().hir_crate_items(());
++        } else {
 +            self.ensure_ok().analysis(());
 +        }
 +    }
@@ -892,16 +972,19 @@ index 5cd7322ce..6141638e2 100644
          // Freeze definitions once we start iterating on them, to prevent adding new ones
          // while iterating. If some query needs to add definitions, it should be `ensure`d above.
 diff --git a/compiler/rustc_session/src/options.rs b/compiler/rustc_session/src/options.rs
-index 0e0671301..a46b7ac51 100644
+index 0e0671301..336b6168c 100644
 --- a/compiler/rustc_session/src/options.rs
 +++ b/compiler/rustc_session/src/options.rs
-@@ -2492,6 +2492,9 @@ pub(crate) fn parse_rust_version(slot: &mut Option<RustcVersion>, v: Option<&str
+@@ -2492,6 +2492,12 @@ pub(crate) fn parse_rust_version(slot: &mut Option<RustcVersion>, v: Option<&str
      eagerly_emit_delayed_bugs: bool = (false, parse_bool, [UNTRACKED],
          "emit delayed bugs eagerly as errors instead of stashing them and emitting \
          them only if an error has not been emitted"),
-+    early_metadata: bool = (false, parse_bool, [UNTRACKED],
++    early_metadata: bool = (false, parse_bool, [TRACKED],
 +        "write crate metadata as soon as item interfaces are checked, before function \
 +        bodies are, so dependent crates can start sooner (default: no)"),
++    early_metadata_verify: bool = (false, parse_bool, [UNTRACKED],
++        "with `-Zearly-metadata`, report bodies type-checked during the early write whose \
++        nested definitions were left out of it (default: no)"),
      ehcont_guard: bool = (false, parse_bool, [TRACKED],
          "generate Windows EHCont Guard tables"),
      embed_metadata: bool = (true, parse_bool, [TRACKED],

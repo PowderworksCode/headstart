@@ -60,15 +60,36 @@ Everything else waits until after the write.
 
 Closures, inline consts and const arguments (`foo::<3>()`) inside a
 function body are definitions of their own. Their types come from
-type-checking the enclosing body. Encoding them would force every body,
-which is the cost this change avoids. So in early mode the encoder defers
-them to the end. It encodes a deferred item only if something else
-already forced its enclosing body, for example an opaque type or a const,
-and repeats until nothing new is forced. The rest are left out.
+type-checking the enclosing body, and encoding them all would force every
+body, which is the cost this change avoids.
 
-A dependent `cargo check` can't name those definitions. It only ever sees
-them through types or MIR that come from a forced body, and those are
-exactly the ones that get encoded.
+So the encoder computes the crate's **interface bodies**: the bodies
+whose type-checking the interface itself depends on. The set is a
+function of the crate's code alone:
+
+- bodies the encoder records MIR for: consts, const fns and coroutines
+  (`async` bodies);
+- statics;
+- functions that define an opaque type (`-> impl Trait`, `async fn`), plus
+  the bodies that may define a `type Alias = impl Trait`.
+
+Definitions nested in an interface body are encoded; those in any other
+body are left out. A dependent `cargo check` can't name the left-out
+ones. It only ever reaches a body's contents through a type or MIR that
+came from an interface body.
+
+The set is a pure function of the code, and that matters in two ways. A
+first version instead encoded a nested definition whenever its body
+happened to have been type-checked already, which it learned by peeking
+at the query cache. That made the metadata depend on evaluation order,
+which varies under the parallel front end, and on what an incremental
+session happened to recompute rather than load from disk. The query
+system is built to rule out both.
+
+`-Zearly-metadata-verify` checks the set. It reports any left-out
+definition whose body was type-checked during the write anyway, which is
+a body the set should have included. The benchmark sweep reports none
+(see [results.md](results.md)).
 
 `required_panic_strategy` is also left out, because computing it scans
 the MIR of every body. Only linking reads it, and check builds don't
@@ -122,13 +143,37 @@ With the variable unset, cargo behaves exactly as upstream.
   dependents have already started, and their work is thrown away. The
   output is still the same as today (see above).
 - **Incremental builds.** Early metadata is written from inside the
-  `analysis` query. The patch lets the encoder read the definitions table
-  without depending on `analysis`, which it normally does. That's fine
-  for clean builds; it hasn't been examined for incremental reuse.
-- **Coverage.** Anything the metadata needs from a body and that the
-  encoder doesn't know to force would show up as an ICE: a missing entry
-  in a dependent, or a definition created after the freeze. The benchmark
-  sweep is how we look for those (see [results.md](results.md)).
+  `analysis` query, so three things needed care:
+  - **Dependency tracking.** The write runs outside `analysis`'s
+    dependency tracking, as encoding normally does. With incremental
+    compilation, encoding tracks itself as a task, and reuses the previous
+    session's `.rmeta` when none of its inputs changed.
+  - **New items.** Normally that task depends on `analysis`, which is how
+    it notices a new definition. Early encoding can't wait for `analysis`
+    without a cycle, so it depends on the crate's item list
+    (`hir_crate_items`) instead. That list changes exactly when
+    definitions are added or removed.
+  - **Mixed sessions.** `-Zearly-metadata` is a tracked option, so
+    toggling it starts a fresh incremental session instead of mixing the
+    two kinds of metadata.
+
+  `scripts/check-incremental.sh` runs a sequence of edits in both modes,
+  including adding an `impl Fn` whose closure a dependent calls and
+  breaking and fixing an interface. It checks that each step, and the
+  final state, matches a clean build.
+- **Memory.** More compilers run at once, so peak memory can rise. On
+  the benchmarks it's mostly flat, with +39% (0.29 GB) on nalgebra at the
+  high end (see [results.md](results.md#peak-memory)).
+- **The parallel front end.** `-Zthreads` uses the same idle cores, so
+  on large builds it leaves headstart little to gain. Together, headstart
+  still helps medium builds (see
+  [results.md](results.md#with-the-parallel-front-end--zthreads8)).
+- **Coverage.** If the metadata needs something from a body that the
+  encoder doesn't know to force, the failure would be a crash in the
+  compiler (an ICE): a missing entry in a dependent, or a definition
+  created after the table is frozen. The benchmark sweep and
+  `-Zearly-metadata-verify` are how we look for those (see
+  [results.md](results.md)). They're evidence, not a proof.
 
 ## Prior art
 

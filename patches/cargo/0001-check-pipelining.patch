@@ -62,7 +62,7 @@ index b866821..ab8d5c8 100644
          Ok(())
      }
 diff --git a/src/compiler/job_queue/mod.rs b/src/compiler/job_queue/mod.rs
-index a581e11..2f7f058 100644
+index a581e11..b9cca0e 100644
 --- a/src/compiler/job_queue/mod.rs
 +++ b/src/compiler/job_queue/mod.rs
 @@ -210,6 +210,36 @@ struct DrainState<'gctx> {
@@ -405,7 +405,22 @@ index a581e11..2f7f058 100644
              }
          }
          self.progress.clear();
-@@ -1003,6 +1198,22 @@ impl<'gctx> DrainState<'gctx> {
+@@ -926,7 +1121,13 @@ impl<'gctx> DrainState<'gctx> {
+         let new_err = new_err.into();
+         if new_err.print_always || err_state.count == 0 {
+             crate::display_error(&new_err.error, shell);
+-            if err_state.count == 0 && !self.active.is_empty() {
++            // Headstart: jobs whose dependency failed don't count; their
++            // output is dropped.
++            let waiting_for_others = self
++                .active
++                .keys()
++                .any(|id| !self.provisional.tainted.contains(id));
++            if err_state.count == 0 && waiting_for_others {
+                 self.progress.indicate_error();
+                 let _ = shell.warn("build failed, waiting for other jobs to finish...");
+             }
+@@ -1003,6 +1204,22 @@ impl<'gctx> DrainState<'gctx> {
          debug!("start {}: {:?}", id, unit);
  
          assert!(self.active.insert(id, unit.clone()).is_none());
@@ -428,7 +443,7 @@ index a581e11..2f7f058 100644
  
          let messages = self.messages.clone();
          let is_fresh = job.freshness().is_fresh();
-@@ -1078,7 +1289,12 @@ impl<'gctx> DrainState<'gctx> {
+@@ -1078,7 +1295,12 @@ impl<'gctx> DrainState<'gctx> {
          let count = self.warning_count.entry(id).or_default();
          count.total += 1;
          if lint {

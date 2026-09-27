@@ -49,6 +49,67 @@ after bodies are checked:
 rustc's UI suite passes with the patch applied and the flag off:
 21967 passed, 0 failed, 421 ignored.
 
+## The interface-body set
+
+Every benchmark, built with headstart on and `-Zearly-metadata-verify`,
+checks that no body was type-checked during the early write without
+being in the interface set. There are no reports on the 49 benchmarks
+that build.
+
+The first run found one bookkeeping bug. For a const argument inside a
+closure, the encoder recorded the closure as the enclosing body instead
+of the function that contains it. nom's `bits::take` returns
+`impl Fn`, so its body is an interface body, and those constants were
+wrongly left out.
+
+## Incremental builds
+
+`scripts/check-incremental.sh` applies ten steps to `tests/errors`, with
+headstart off and on in separate directories:
+
+- an initial build;
+- a body edit;
+- adding an `impl Fn` whose closure a dependent calls;
+- changing that closure;
+- breaking an interface, then fixing it;
+- adding a body error, then fixing it;
+- an edit in the binary;
+- touching every file.
+
+Every step prints the same output in both modes, and the final state
+matches a clean build.
+
+It found two bugs:
+
+1. **A crash on the first incremental build.** Metadata encoding asserts
+   that it runs outside dependency tracking, and the early write ran
+   inside the `analysis` query.
+2. **A stale-metadata risk behind it.** In incremental mode, encoding
+   reuses the previous `.rmeta` when its inputs are unchanged. Normally it
+   depends on `analysis`, which is how it notices new items, and the early
+   write had dropped that dependency. It now depends on the crate's item
+   list.
+
+## Clippy and rustdoc
+
+Both read check-mode metadata, so both read early metadata with headstart
+on.
+
+- **Clippy.** `cargo check` with `clippy-driver` as the workspace
+  wrapper, which is what `cargo clippy` does, over all 49 benchmarks that
+  build. The results are identical with headstart off and on: 5534 clippy
+  diagnostics in total. Six benchmarks fail in both modes on
+  deny-by-default lints, with identical output.
+- **rustdoc.** `cargo doc`, including every dependency's docs, on eight
+  benchmarks: ripgrep, hyper, regex-automata, image, html5ever, tt-muncher,
+  unicode-normalization and eza (up to 30,000 files). Six are
+  byte-identical.
+  - The other two differ only in rustdoc's merged search index, and, on
+    macOS's case-insensitive filesystem, in whether rustix's `_Exit` or
+    `_exit` page keeps its file name.
+  - Both already depend on scheduling order: changing `-j` with headstart
+    *off* reproduces both differences.
+
 ## Errors
 
 **Same output.** `scripts/check-errors.sh` builds `tests/errors` in three
@@ -134,6 +195,79 @@ headstart:
 - **The sweep still passes.** Rerun on these patches: 52 of 53
   benchmarks pass in both modes with identical diagnostics, and stm32f4
   fails in both.
+
+## Peak memory
+
+These runs sample the total resident memory of all rustc processes every
+100 ms during clean `cargo check` builds, on Linux with 16 jobs, median
+of 3 ([raw runs](../results/memory-2026-09-27-linux/runs.tsv)):
+
+| project | peak today | peak with headstart | change | time today | time with headstart |
+|---|--:|--:|--:|--:|--:|
+| cargo-0.87.1 | 2.81 GB | 2.69 GB | −4% | 52.5 s | 41.5 s |
+| eza-0.21.2 | 2.21 GB | 2.24 GB | +1% | 28.1 s | 21.1 s |
+| ripgrep-14.1.1 | 1.63 GB | 1.68 GB | +3% | 10.2 s | 5.6 s |
+| image-0.25.6 | 1.92 GB | 2.17 GB | +13% | 19.9 s | 15.7 s |
+| nalgebra-0.33.0 | 0.76 GB | 1.05 GB | +39% | 22.9 s | 19.0 s |
+| diesel-2.2.10 | 0.75 GB | 0.75 GB | −1% | 38.9 s | 39.5 s |
+
+- **Mostly flat.** With more crates running at once, more of them are
+  in memory together.
+- **nalgebra is the outlier:** 0.29 GB more, because its large crates now
+  overlap.
+- **The final patches don't cost speed.** The times, measured on those
+  patches, match the timing table above: the interface-body rule and the
+  incremental fixes didn't change it.
+
+## With the parallel front end (`-Zthreads=8`)
+
+The parallel front end type-checks a crate's bodies on several threads.
+It uses the same idle cores headstart does, so the question is what's
+left for headstart. These are clean `cargo check` builds with
+`RUSTFLAGS=-Zthreads=8` in both modes, on Linux with 16 jobs, median of 3
+([raw runs](../results/threads8-2026-09-27-linux/runs.tsv)):
+
+| project | `-Zthreads=8` | + headstart | saved | headstart alone |
+|---|--:|--:|--:|--:|
+| ripgrep-14.1.1 | 4.52 s | 3.49 s | 23% | 47% |
+| hyper-1.6.0 | 1.25 s | 1.00 s | 20% | 26% |
+| serde_derive-1.0.219 | 2.77 s | 2.24 s | 19% | 36% |
+| eza-0.21.2 | 15.72 s | 14.79 s | 6% | 26% |
+| image-0.25.6 | 9.26 s | 9.15 s | 1% | 21% |
+| regex-automata-0.4.8 | 2.65 s | 2.68 s | −1% | 21% |
+| cargo-0.87.1 | 29.38 s | 30.39 s | −3% | 21% |
+
+The two overlap:
+
+- **The parallel front end is the bigger win on large builds.** On its
+  own it takes cargo-0.87.1 from about 50 s to 29 s. Headstart on its own
+  takes it to 39 s.
+- **Together, headstart still helps medium builds** with dependency
+  chains: ripgrep, hyper, serde_derive. It adds nothing to builds the
+  parallel front end already saturates.
+- **They work together correctly:** diagnostics matched in every run.
+
+The parallel front end is still nightly-only and off by default. Once it
+ships, headstart's value is the remainder in this table, not the tables
+above.
+
+## Incremental edit loop
+
+These runs edit one function body in cargo's own workspace, then run an
+incremental `cargo check`, with a warm target directory per mode. Each
+number is the median of 5 edits on Linux with 16 jobs
+([raw runs](../results/incremental-2026-09-27-linux/runs.tsv)):
+
+| edited file | today | headstart | saved |
+|---|--:|--:|--:|
+| `crates/cargo-util/src/paths.rs` | 6.07 s | 5.72 s | 6% |
+| `crates/cargo-util-schemas/src/manifest/mod.rs` | 6.28 s | 5.80 s | 8% |
+| `src/compiler/mod.rs` (the `cargo` crate) | 5.65 s | 5.28 s | 7% |
+
+The gain is smaller than in clean builds, because only the edited crate
+and its dependents recheck. But it applies to every edit. Even an edit to
+the top `cargo` library saves time, because cargo's binaries start on
+the library's early metadata.
 
 ## Timing: Apple M2 Max, 12 jobs, 5 runs (first version)
 
