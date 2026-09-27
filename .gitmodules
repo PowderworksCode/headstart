@@ -1,0 +1,8 @@
+[submodule "rustc"]
+	path = rustc
+	url = https://github.com/rust-lang/rust
+	shallow = true
+[submodule "cargo"]
+	path = cargo
+	url = https://github.com/rust-lang/cargo
+	shallow = true

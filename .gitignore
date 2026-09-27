@@ -1,0 +1,4 @@
+# Benchmark scratch: copied projects and their target dirs.
+/results/*/work/
+/tests/smoke/target/
+/tests/smoke/Cargo.lock
