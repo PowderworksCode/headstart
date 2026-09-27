@@ -74,6 +74,12 @@ exactly the ones that get encoded.
 the MIR of every body. Only linking reads it, and check builds don't
 link.
 
+The encoder also skips computing the crate's reachable set. It only
+consults that set when generating code, and computing it walks the bodies
+of every `#[inline]` and generic function. Before this fix, the early
+write forced about 8× more work than the same encoding costs today (see
+[results.md](results.md)).
+
 Because of these omissions, early metadata is never used for an rlib.
 
 ## cargo: `CARGO_HEADSTART=1`
@@ -88,14 +94,33 @@ With `CARGO_HEADSTART=1`:
   job queue then releases a check unit's dependents on the `.rmeta`
   notification, as it does for pipelined builds.
 - Each check unit that has such dependents is passed `-Zearly-metadata`.
+- A check unit doesn't get the synthetic edges that cargo adds for units
+  that link. Normally a binary also waits for the *full* build of every
+  transitive dependency, because it links against them. A check build
+  never links, so those edges would only make binaries wait for their
+  whole dependency tree to finish checking.
+- **Only error-free dependencies get their output reported.** A unit that
+  started before its dependencies finished is provisional. Its
+  diagnostics, its JSON messages and its own result are held until every
+  dependency has finished cleanly, and then emitted in their original
+  order. If a dependency fails, they're dropped. A held unit still frees
+  its job slot and unblocks its dependents as usual. So a failing build
+  prints the same diagnostics, JSON messages and exit status as today.
+  The only difference is the `Checking` progress lines of the dependents
+  that started early.
 
 With the variable unset, cargo behaves exactly as upstream.
 
 ## Risks
 
-- **Errors surface later, and extra work gets thrown away.** If a crate's
-  body fails to check, its dependents have already started. The build
-  still fails with the same error.
+- **A crate's own errors surface a little later.** They're delayed by the
+  early write: 4 ms for the median crate in cargo-0.87.1's build, and
+  249 ms at p99 (see [results.md](results.md)). This is the objection
+  that stopped the 2019 attempt ([rust-lang/rust#64112]); here the cost
+  is measured.
+- **Wasted work on failure.** If a crate's body fails to check, its
+  dependents have already started, and their work is thrown away. The
+  output is still the same as today (see above).
 - **Incremental builds.** Early metadata is written from inside the
   `analysis` query. The patch lets the encoder read the definitions table
   without depending on `analysis`, which it normally does. That's fine
@@ -104,3 +129,24 @@ With the variable unset, cargo behaves exactly as upstream.
   encoder doesn't know to force would show up as an ICE: a missing entry
   in a dependent, or a definition created after the freeze. The benchmark
   sweep is how we look for those (see [results.md](results.md)).
+
+## Prior art
+
+In 2019, Nicholas Nethercote moved metadata writing before type-checking
+and borrow-checking in [rust-lang/rust#64112]. He measured debug and
+release builds, where code generation dominates and cargo already
+overlaps it with dependents, and saw at most 1.07×. He abandoned the
+change because "it wasn't much of a win, and it would slightly delay
+error message emission"
+([blog](https://blog.mozilla.org/nnethercote/2019/10/11/how-to-speed-up-the-rust-compiler-some-more-in-2019/)).
+The approach wasn't tried on check builds, and cargo doesn't pipeline
+those at all. In a check build, type-checking bodies *is* the work, and
+the metadata carries almost no MIR.
+
+David Lattimore's
+["Speeding up rustc by being lazy"](https://davidlattimore.github.io/posts/2024/06/05/speeding-up-rustc-by-being-lazy.html)
+(2024) proposes a first step that writes an `.rmeta` with "only what's
+needed to check dependent crates" and then finishes the error checking.
+He framed it as a way to speed up full builds.
+
+[rust-lang/rust#64112]: https://github.com/rust-lang/rust/pull/64112

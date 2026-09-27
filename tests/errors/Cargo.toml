@@ -1,0 +1,6 @@
+# Failure behavior: `slow` checks its bodies for several seconds, `mid` and
+# `app` start on its early metadata. `--features slow/broken` puts an error
+# in one of `slow`'s bodies; `--features app/broken` puts one in `app`.
+[workspace]
+members = ["slow", "mid", "app"]
+resolver = "2"

@@ -1,0 +1,10 @@
+[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+broken = []
+
+[dependencies]
+mid = { path = "../mid" }

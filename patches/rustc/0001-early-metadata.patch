@@ -116,7 +116,7 @@ index da0ebce5b..240d5ca8f 100644
  
      let is_host_metadata = tcx
 diff --git a/compiler/rustc_metadata/src/rmeta/encoder.rs b/compiler/rustc_metadata/src/rmeta/encoder.rs
-index afa5646be..ff27152d2 100644
+index afa5646be..7eb5e8c04 100644
 --- a/compiler/rustc_metadata/src/rmeta/encoder.rs
 +++ b/compiler/rustc_metadata/src/rmeta/encoder.rs
 @@ -6,6 +6,7 @@
@@ -632,7 +632,7 @@ index afa5646be..ff27152d2 100644
          }
      }
  
-@@ -1859,71 +1880,149 @@ fn encode_precise_capturing_args(&mut self, def_id: DefId) {
+@@ -1859,71 +1880,157 @@ fn encode_precise_capturing_args(&mut self, def_id: DefId) {
          record_array!(self.tables.rendered_precise_capturing_args[def_id] <- precise_capturing_args);
      }
  
@@ -731,7 +731,12 @@ index afa5646be..ff27152d2 100644
 +                    return None;
                  }
 +                return Some(tcx.typeck_root_def_id_local(def_id));
-+            }
+             }
+-            let mut is_trivial = false;
+-            if encode_const {
+-                if let Some((val, ty)) = tcx.trivial_const(def_id) {
+-                    is_trivial = true;
+-                    record!(self.tables.trivial_const[def_id.to_def_id()] <- (val, ty));
 +            // Inline consts are type-checked with their parent body.
 +            DefKind::AnonConst if tcx.is_typeck_child(def_id.to_def_id()) => {
 +                return Some(tcx.typeck_root_def_id_local(def_id));
@@ -752,12 +757,7 @@ index afa5646be..ff27152d2 100644
 +                | hir::Node::ImplItem(_)
 +                | hir::Node::ForeignItem(_) => return None,
 +                _ => {}
-             }
--            let mut is_trivial = false;
--            if encode_const {
--                if let Some((val, ty)) = tcx.trivial_const(def_id) {
--                    is_trivial = true;
--                    record!(self.tables.trivial_const[def_id.to_def_id()] <- (val, ty));
++            }
 +        }
 +        None
 +    }
@@ -774,14 +774,14 @@ index afa5646be..ff27152d2 100644
                  } else {
 -                    is_trivial = false;
 -                    record!(self.tables.mir_for_ctfe[def_id.to_def_id()] <- tcx.mir_for_ctfe(def_id));
-+                    self.deferred_mir.push((def_id, body, c, o));
-                 }
+-                }
 -
 -                // FIXME(generic_const_exprs): this feels wrong to have in `encode_mir`
 -                let abstract_const = tcx.thir_abstract_const(def_id);
 -                if let Ok(Some(abstract_const)) = abstract_const {
 -                    record!(self.tables.thir_abstract_const[def_id.to_def_id()] <- abstract_const);
--                }
++                    self.deferred_mir.push((def_id, body, c, o));
+                 }
 -
 -                if should_encode_const(tcx.def_kind(def_id)) {
 -                    let qualifs = tcx.mir_const_qualif(def_id);
@@ -818,7 +818,15 @@ index afa5646be..ff27152d2 100644
 +        }
 +
 +        let tcx = self.tcx;
-+        let reachable_set = tcx.reachable_set(());
++        // `should_encode_mir` only consults the reachable set when generating
++        // code, and computing it walks the bodies of inline and generic
++        // functions. With `-Zearly-metadata` (never codegen), skip it.
++        let unreachable = LocalDefIdSet::default();
++        let reachable_set = if tcx.sess.encoding_early_metadata.load(Ordering::Relaxed) {
++            &unreachable
++        } else {
++            tcx.reachable_set(())
++        };
 +
 +        let keys_and_jobs = tcx.mir_keys(()).iter().filter_map(|&def_id| {
 +            let (encode_const, encode_opt) = should_encode_mir(tcx, reachable_set, def_id);
@@ -833,7 +841,7 @@ index afa5646be..ff27152d2 100644
          }
  
          // Encode all the deduced parameter attributes for everything that has MIR, even for items
-@@ -2691,6 +2790,8 @@ fn with_encode_metadata_header(
+@@ -2691,6 +2798,8 @@ fn with_encode_metadata_header(
          is_proc_macro: tcx.crate_types().contains(&CrateType::ProcMacro),
          hygiene_ctxt: Default::default(),
          symbol_index_table: Default::default(),

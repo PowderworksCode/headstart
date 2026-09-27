@@ -10,8 +10,10 @@ the interface is checked, and makes cargo start dependents on it. Each
 crate's bodies are checked while the crates downstream are already
 compiling.
 
-If a body has an error, the build still fails with that error. The only
-cost is work done downstream that gets thrown away.
+If a body has an error, the build still fails with that error, and prints
+exactly what it prints today. Cargo reports a crate's output only once all
+its dependencies have finished cleanly, and drops it if one fails. The
+only cost is work done downstream that gets thrown away.
 
 ## Pieces
 
@@ -47,6 +49,11 @@ the same binaries give a fair baseline.
 library takes several seconds to check, almost all of it in function
 bodies. With headstart on, `app` starts about 0.2 s in instead of
 waiting for `slow` to finish.
+
+`scripts/check-errors.sh` checks the claim about errors on `tests/errors`. It builds
+three scenarios (a clean build, an error in a dependency, an error in the
+binary) with headstart off and on. It then compares the human-readable
+output, the JSON output and the exit status.
 
 ## Benchmarks
 
