@@ -14,11 +14,12 @@ from it right away, while the crate itself goes on checking its bodies.
 
 - **`cargo check`** never needs more than that, so dependents run to
   completion on early metadata.
-- **`cargo build`** also has to generate code. A dependent does all of its
-  analysis against early metadata, then waits for the dependency's full
-  metadata before code generation, because instantiating generic and
-  inline functions needs their MIR. While it waits, it gives its job slot
-  back.
+- **`cargo build`** also has to generate code and link. A dependent does
+  all of its analysis against early metadata. It waits for the
+  dependency's full metadata before code generation, because instantiating
+  generic and inline functions needs their MIR. A crate that links
+  (binaries, tests, proc macros, build scripts) also waits for the rlibs
+  before linking. While it waits, its job slot goes to other work.
 
 If a body turns out to be wrong, the crate still fails, and so does the
 build. Dependents that started early have their work thrown away, and
@@ -59,13 +60,24 @@ Crates nothing can depend on, such as binaries, write no early metadata.
 
 ### One crate hash for both files
 
-The two files describe the same crate, so they must carry the same crate
-hash (SVH). Otherwise a dependent compiled against one and a crate loaded
-through the other would see a mismatch. This rustc computes the SVH from
-the encoded metadata bytes by default, and the two files' bytes differ.
-With `-Zearly-metadata`, the SVH comes from the HIR instead. That's the
-scheme rustc used for years, and it's still available as
-`-Zmetadata-crate-hash=no`. The encoder asserts that both encodings agree.
+The two files describe the same crate, so they carry the same crate hash
+(SVH). A dependent records the hash of each crate it compiled against,
+and anything loaded later is matched against it. That hash is computed
+once, from the early metadata, with upstream's scheme: the encoded bytes
+plus a supplement of the HIR hash and the tracked options. Full metadata
+carries the same one.
+
+It's a complete identity from the start:
+- the early metadata's bytes cover the interface, including every
+  dependency's hash;
+- the HIR hash in the supplement covers every body;
+- the tracked options are included too.
+
+Full metadata is a deterministic function of exactly those inputs, so a
+change to any function body changes the hash, even one that doesn't
+touch the early metadata. Incremental compilation relies on this: it
+uses a dependency's crate hash to decide whether results derived from it
+are still valid, including code inlined or instantiated from its bodies.
 
 ### What encoding still forces
 
@@ -117,52 +129,61 @@ Everything else waits until after the write.
 
 ### Consuming early metadata
 
+Writing early metadata first deletes the crate's stale full metadata and
+rlib. So a full `.rmeta` or `.rlib` next to early metadata is always from
+the same compilation or a later one, never an earlier one.
+
 With the flag, crate loading also considers `libfoo-hash.early-rmeta`, both
 for `--extern foo=libfoo-hash.rmeta` and when searching directories for
-transitive dependencies:
-
-- If only one of the two files exists, that one is loaded.
-- If both exist with the same crate hash, they describe the same crate,
-  and the full one is loaded.
-- If both exist with different hashes, one is left over from an earlier
-  compilation, and the newer one is loaded.
-
-Modification times alone don't decide, because incremental compilation
-can reuse a full `.rmeta` from its cache by hard-linking it, which keeps
-the old time.
+transitive dependencies. It loads the full metadata if it exists, and the
+early metadata otherwise. A crate that links and loads a dependency from
+metadata also records where the dependency's rlib will be written. The
+file may not exist yet.
 
 Before code generation, `CStore::load_full_metadata` replaces every
 dependency loaded from early metadata with its full metadata:
 
-- **Waiting.** If the full file doesn't exist yet with the same crate
-  hash, rustc waits for it (see *Pausing* below).
+- **Waiting.** If the full file doesn't exist yet, rustc waits for it
+  (see *Pausing* below). It checks that the file carries the same crate
+  hash.
 - **Swapping.** It loads the full blob into a new `CrateMetadata`, keeping
   what the session decided while loading the crate: its crate number
   mapping, dependency kind, and whether it's used.
 - **Lookups.** From then on, the crate store's lookup returns the new
   entry. The early entry stays alive, so anything already decoded from it
   stays valid.
+- **The type cache.** rustc caches types decoded from metadata by their
+  position in the blob. The swapped crate's entries are dropped, because
+  a position means something else in the full blob.
 - **Source files.** These are imported again from the full blob's table,
   because an imported file records its index in the table it came from.
 
+Before linking, `CStore::wait_for_rlibs` waits for the recorded rlib
+paths to exist; rlibs are written atomically. With cross-crate LTO, which
+reads dependencies' rlibs during code generation, it waits before code
+generation instead.
+
 ### Pausing
 
-When rustc has to wait for a dependency's full metadata:
+When rustc has to wait for a dependency's full metadata or rlib:
 
-1. It announces a `wait-metadata` artifact notification.
-2. It releases a token to the jobserver, so the build tool can run
-   something else on its slot.
-3. It polls for the file.
-4. Before continuing, it takes a token again and announces `resume`.
+1. It announces a `wait-metadata` artifact notification naming the file,
+   and polls for it.
+2. The build tool stops counting it as running, so its job slot can go to
+   other work.
+3. To continue, rustc takes a jobserver token and announces `resume`. The
+   build tool returns that token to the jobserver when the compilation
+   finishes.
 
-This goes around the jobserver proxy, which never releases a process's
-last token; pausing needs exactly that. The crate graph has no cycles, so
-the oldest unfinished dependency is always running or waiting for a slot,
-and waiting can't deadlock.
+The crate graph has no cycles, so what a paused compilation waits for is
+always running or queued, and waiting can't deadlock.
 
-If the build tool writes `libfoo-hash.failed-rmeta`, the dependency failed
-after writing early metadata. Its full metadata will never come, so the
-waiting rustc stops with an error. Its output is dropped anyway (below).
+**Retraction.** If a crate fails after writing early metadata, its
+promise is withdrawn: the early file is deleted. rustc does this when a
+compilation ends with errors or panics. A build tool can do it when the
+compiler crashes. A compilation waiting for that crate's full metadata or
+rlib sees the early metadata disappear, and stops with an error. Its
+output is dropped anyway (below).
 
 ## cargo: `CARGO_HEADSTART=1`
 
@@ -170,20 +191,32 @@ With the variable set:
 
 - **Every rustc compile gets `-Zearly-metadata`.** Crates with dependents
   write early metadata, and every crate can load it.
-- **Dependents start on the `early-metadata` notification.** Cargo already
-  pipelines `cargo build` on the `metadata` notification. Headstart also
-  pipelines `cargo check` (`BuildRunner::only_requires_rmeta` holds between
-  check units), and both start on early metadata. A unit's dependents are
-  released once, on whichever notification comes first. Cargo now reads
-  the notification's `emit` field instead of guessing from the file
-  extension.
-- **Check units don't wait for their whole dependency tree.** Cargo makes
-  a unit that links wait for the *full* build of every transitive
-  dependency. A check build never links, so check units don't get those
-  edges. Binaries in `cargo build` still wait for all rlibs.
-- **Failure markers.** Cargo deletes a unit's `.failed-rmeta` marker when
-  it starts, and writes it if the unit fails, so dependents waiting for
-  its full metadata stop.
+- **Dependents start on the `early-metadata` notification.**
+  - Every unit rustc compiles, in check, build or test mode, starts on its
+    rlib dependencies' early metadata. That includes binaries, tests,
+    proc macros and build scripts.
+  - Proc-macro and dylib dependencies still need a full build.
+  - Cargo already pipelined `cargo build` libraries on the `metadata`
+    notification. Headstart extends that to every unit, and to
+    `cargo check`.
+  - A unit's dependents are released once, on whichever notification
+    comes first. Cargo now reads the notification's `emit` field instead
+    of guessing from the file extension.
+- **No waiting for the whole dependency tree.** Cargo normally makes a
+  unit that links wait for the *full* build of every transitive
+  dependency. Under headstart, rustc waits for the rlibs itself right
+  before linking, so those edges go.
+- **Pause accounting.**
+  - A paused compilation (a `wait-metadata` notification) doesn't count as
+    running, so its slot goes to other work.
+  - Once the file it waits for is written (a `metadata` or `link`
+    notification), cargo starts no new work until it has resumed. That
+    way it takes the next freed token, instead of being starved by work
+    started in its place.
+  - The token it resumed with goes back to the jobserver when it
+    finishes.
+- **Retraction.** When a unit fails, cargo deletes its early metadata, in
+  case rustc crashed before it could.
 - **Only error-free dependencies get their output reported.** A unit that
   started before its dependencies finished is provisional. Its
   diagnostics, JSON messages and result are held until every dependency
@@ -212,12 +245,14 @@ With the variable unset, cargo behaves exactly as upstream.
 - **Wasted work on failure.** When a crate fails, its dependents' work so
   far is thrown away. The output is still the same as today.
 - **Incremental builds.** `-Zearly-metadata` is a tracked option, so
-  toggling it starts a fresh incremental session. Full metadata that
-  incremental compilation reuses carries the same crate hash, which is
-  why the crate hash, not the file's age, decides between the two files.
+  toggling it starts a fresh incremental session. The crate hash covers
+  every body (see above), so dependents' incremental results stay sound.
   `scripts/check-incremental.sh` runs a sequence of edits under `cargo
   check` and `cargo build`. It checks that each step, and the final
   state, matches a clean build.
+- **Platforms.** Retraction deletes a file that dependents may have
+  memory-mapped. That's fine on Unix; on Windows, deleting an open file
+  can fail, and that path hasn't been tested.
 - **Memory.** More compilers are alive at once, including paused ones,
   so peak memory can rise (see [results.md](results.md#peak-memory)).
   Cargo doesn't cap the number of paused compilers yet.

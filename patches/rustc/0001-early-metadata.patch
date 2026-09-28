@@ -195,7 +195,7 @@ index 759297bc6..ae0153678 100644
          let _timing = sess.timings.section_guard(sess.dcx(), TimingSection::Linking);
          codegen_backend.link(
 diff --git a/compiler/rustc_metadata/src/creader.rs b/compiler/rustc_metadata/src/creader.rs
-index aea843ac0..9066e4e4e 100644
+index aea843ac0..a105d1a5f 100644
 --- a/compiler/rustc_metadata/src/creader.rs
 +++ b/compiler/rustc_metadata/src/creader.rs
 @@ -1,7 +1,7 @@
@@ -286,29 +286,35 @@ index aea843ac0..9066e4e4e 100644
      }
  
      pub fn all_proc_macro_def_ids(&self, tcx: TyCtxt<'_>) -> impl Iterator<Item = DefId> {
-@@ -1425,3 +1484,76 @@ fn visit_item(&mut self, item: &'ast ast::Item) {
+@@ -1425,3 +1484,81 @@ fn visit_item(&mut self, item: &'ast ast::Item) {
      visit::walk_crate(&mut f, krate);
      f.spans
  }
 +
 +/// While this compilation waits for dependencies' full metadata or rlibs, it
-+/// tells the build tool (a `wait-metadata` artifact notification naming the
-+/// file), which
-+/// can give its job slot to other work. To resume, it takes a jobserver token
-+/// and then says so (`resume`); the build tool returns that token to the
-+/// jobserver when the compilation finishes, and gives freed tokens to paused
-+/// compilations whose metadata is ready before starting new work.
++/// tells the build tool, announcing each file it waits for in turn (a
++/// `wait-metadata` artifact notification) and when it continues (`resume`).
++/// The build tool can give its job slot to other work meanwhile. It resumes
++/// as soon as the file is written, without taking a jobserver token, so it
++/// can't be starved by work started in its place: the build tool counts it
++/// as running again and starts nothing new until enough jobs finish. This
++/// never touches the jobserver.
 +#[derive(Default)]
 +struct Pause {
 +    paused: bool,
++    /// The file announced last: a paused compilation can wait for several
++    /// files in turn, and announces each, so the build tool knows when it's
++    /// really ready to resume.
++    waiting_for: Option<PathBuf>,
 +}
 +
 +impl Pause {
 +    fn pause(&mut self, sess: &Session, waiting_for: &Path) {
-+        if self.paused {
++        if self.waiting_for.as_deref() == Some(waiting_for) {
 +            return;
 +        }
 +        self.paused = true;
++        self.waiting_for = Some(waiting_for.to_path_buf());
 +        if sess.opts.json_artifact_notifications {
 +            sess.dcx().emit_artifact_notification(waiting_for, "wait-metadata");
 +        }
@@ -319,9 +325,8 @@ index aea843ac0..9066e4e4e 100644
 +            return;
 +        }
 +        self.paused = false;
-+        // Only a build tool that follows the notifications gave this slot away.
++        self.waiting_for = None;
 +        if sess.opts.json_artifact_notifications {
-+            rustc_data_structures::jobserver::client().acquire_raw().ok();
 +            sess.dcx().emit_artifact_notification(Path::new(""), "resume");
 +        }
 +    }
