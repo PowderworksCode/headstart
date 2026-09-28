@@ -1,27 +1,30 @@
 diff --git a/src/compiler/build_runner/mod.rs b/src/compiler/build_runner/mod.rs
-index 4bf69f6..ec435fb 100644
+index 4bf69f6..5bb5e02 100644
 --- a/src/compiler/build_runner/mod.rs
 +++ b/src/compiler/build_runner/mod.rs
-@@ -763,6 +763,12 @@ impl<'a, 'gctx> BuildRunner<'a, 'gctx> {
+@@ -763,6 +763,15 @@ impl<'a, 'gctx> BuildRunner<'a, 'gctx> {
      /// Returns whether when `parent` depends on `dep` if it only requires the
      /// metadata file from `dep`.
      pub fn only_requires_rmeta(&self, parent: &Unit, dep: &Unit) -> bool {
-+        // Headstart: a check unit needs only its check dependencies' metadata,
-+        // which `-Zearly-metadata` writes before their bodies are checked.
-+        if headstart() && parent.mode.is_check() && dep.mode == (CompileMode::Check { test: false })
-+        {
++        // Headstart: a compile unit starts on its library dependencies' early
++        // metadata (`-Zearly-metadata`), written before their bodies are
++        // checked. Check units need nothing more. Units that generate code
++        // wait for full metadata before code generation, and units that link
++        // wait for the rlibs before linking; rustc does both. Dependencies
++        // that must be fully built (proc macros, dylibs) still are.
++        if headstart() && headstart_starts_early(parent, dep) {
 +            return true;
 +        }
          // We're only a candidate for requiring an `rmeta` file if we
          // ourselves are building an rlib,
          !parent.requires_upstream_objects()
-@@ -773,6 +779,13 @@ impl<'a, 'gctx> BuildRunner<'a, 'gctx> {
+@@ -773,6 +782,13 @@ impl<'a, 'gctx> BuildRunner<'a, 'gctx> {
              && dep.mode == CompileMode::Build
      }
  
-+    /// Whether headstart is on (`CARGO_HEADSTART=1`): check units are built
-+    /// with `-Zearly-metadata`, and a check unit's dependents start as soon as
-+    /// its metadata is written, before its function bodies are checked.
++    /// Whether headstart is on (`CARGO_HEADSTART=1`): units are compiled with
++    /// `-Zearly-metadata`, and a unit's dependents start as soon as its early
++    /// metadata is written, before its function bodies are checked.
 +    pub fn headstart_enabled(&self) -> bool {
 +        headstart()
 +    }
@@ -29,10 +32,26 @@ index 4bf69f6..ec435fb 100644
      /// Returns whether when `unit` is built whether it should emit metadata as
      /// well because some compilations rely on that.
      pub fn rmeta_required(&self, unit: &Unit) -> bool {
-@@ -816,3 +829,9 @@ impl<'a, 'gctx> BuildRunner<'a, 'gctx> {
+@@ -816,3 +832,25 @@ impl<'a, 'gctx> BuildRunner<'a, 'gctx> {
          }
      }
  }
++
++/// Whether, with headstart, `parent` can start on `dep`'s early metadata.
++fn headstart_starts_early(parent: &Unit, dep: &Unit) -> bool {
++    let compiled_by_rustc = matches!(
++        parent.mode,
++        CompileMode::Build | CompileMode::Test | CompileMode::Check { .. }
++    );
++    let dep_is_rlib = dep.target.is_lib() && !dep.requires_upstream_objects();
++    compiled_by_rustc
++        && dep_is_rlib
++        && if parent.mode.is_check() {
++            dep.mode == (CompileMode::Check { test: false })
++        } else {
++            dep.mode == CompileMode::Build
++        }
++}
 +
 +fn headstart() -> bool {
 +    static ON: std::sync::LazyLock<bool> =
@@ -111,7 +130,7 @@ index b866821..dbc107c 100644
          self.messages
              .push(Message::Finish(self.id, Artifact::Metadata, Ok(())));
 diff --git a/src/compiler/job_queue/mod.rs b/src/compiler/job_queue/mod.rs
-index a581e11..fe9add9 100644
+index a581e11..40d5c8c 100644
 --- a/src/compiler/job_queue/mod.rs
 +++ b/src/compiler/job_queue/mod.rs
 @@ -210,6 +210,50 @@ struct DrainState<'gctx> {
@@ -191,21 +210,26 @@ index a581e11..fe9add9 100644
      UnusedExterns(JobId, std::collections::BTreeSet<InternedString>),
  }
  
-@@ -453,7 +505,12 @@ impl<'gctx> JobQueue<'gctx> {
+@@ -453,7 +505,17 @@ impl<'gctx> JobQueue<'gctx> {
          // the target as well. This should ensure that edges changed to
          // `Metadata` propagate upwards `All` dependencies to anything that
          // transitively contains the `Metadata` edge.
 -        if unit.requires_upstream_objects() {
 +        //
-+        // Headstart: a check unit never links, so it needs only its direct
++        // Headstart: a unit compiled by rustc needs only its direct
 +        // dependencies' metadata, whose own dependencies' metadata came first.
-+        if unit.requires_upstream_objects()
-+            && !(build_runner.headstart_enabled() && unit.mode.is_check())
-+        {
++        // A check unit never links; one that does waits for the rlibs itself
++        // before linking.
++        let rustc_waits_for_rlibs = build_runner.headstart_enabled()
++            && matches!(
++                unit.mode,
++                CompileMode::Build | CompileMode::Test | CompileMode::Check { .. }
++            );
++        if unit.requires_upstream_objects() && !rustc_waits_for_rlibs {
              for dep in dependencies {
                  depend_on_deps_of_deps(build_runner, &mut queue_deps, dep.unit.clone());
              }
-@@ -523,6 +580,14 @@ impl<'gctx> JobQueue<'gctx> {
+@@ -523,6 +585,14 @@ impl<'gctx> JobQueue<'gctx> {
              ),
              finished: 0,
              per_package_future_incompat_reports: Vec::new(),
@@ -220,7 +244,7 @@ index a581e11..fe9add9 100644
          };
  
          // Create a helper thread for acquiring jobserver tokens
-@@ -588,7 +653,11 @@ impl<'gctx> DrainState<'gctx> {
+@@ -588,7 +658,11 @@ impl<'gctx> DrainState<'gctx> {
          // The `pending_queue` is sorted in ascending priority order, and we
          // remove items from its end to schedule the highest priority items
          // sooner.
@@ -233,7 +257,7 @@ index a581e11..fe9add9 100644
              let (unit, job, _) = self.pending_queue.pop().unwrap();
              *self.counts.get_mut(&unit.pkg.package_id()).unwrap() -= 1;
              // Print out some nice progress information.
-@@ -607,8 +676,27 @@ impl<'gctx> DrainState<'gctx> {
+@@ -607,8 +681,27 @@ impl<'gctx> DrainState<'gctx> {
          Ok(())
      }
  
@@ -262,7 +286,7 @@ index a581e11..fe9add9 100644
      }
  
      fn handle_event(
-@@ -616,7 +704,9 @@ impl<'gctx> DrainState<'gctx> {
+@@ -616,7 +709,9 @@ impl<'gctx> DrainState<'gctx> {
          build_runner: &mut BuildRunner<'_, '_>,
          event: Message,
      ) -> Result<(), ErrorToHandle> {
@@ -273,7 +297,7 @@ index a581e11..fe9add9 100644
          match event {
              Message::Run(id, cmd) => {
                  build_runner
-@@ -627,10 +717,10 @@ impl<'gctx> DrainState<'gctx> {
+@@ -627,10 +722,10 @@ impl<'gctx> DrainState<'gctx> {
                  self.timings
                      .unit_start(build_runner, id, self.active[&id].clone());
              }
@@ -286,7 +310,7 @@ index a581e11..fe9add9 100644
                  let mut shell = build_runner.bcx.gctx.shell();
                  shell.print_ansi_stderr(err.as_bytes())?;
                  shell.err().write_all(b"\n")?;
-@@ -678,34 +768,11 @@ impl<'gctx> DrainState<'gctx> {
+@@ -678,34 +773,11 @@ impl<'gctx> DrainState<'gctx> {
                      // from the `active` map ...
                      Artifact::All => {
                          trace!("end: {:?}", id);
@@ -324,7 +348,7 @@ index a581e11..fe9add9 100644
                          }
                          unit
                      }
-@@ -718,7 +785,12 @@ impl<'gctx> DrainState<'gctx> {
+@@ -718,7 +790,12 @@ impl<'gctx> DrainState<'gctx> {
                  };
                  debug!("end ({:?}): {:?}", unit, result);
                  match result {
@@ -338,7 +362,7 @@ index a581e11..fe9add9 100644
                      Err(_) if build_runner.bcx.unit_can_fail_for_docscraping(&unit) => {
                          build_runner
                              .failed_scrape_units
-@@ -728,6 +800,7 @@ impl<'gctx> DrainState<'gctx> {
+@@ -728,6 +805,7 @@ impl<'gctx> DrainState<'gctx> {
                          self.queue.finish(&unit, &artifact);
                      }
                      Err(error) => {
@@ -346,7 +370,7 @@ index a581e11..fe9add9 100644
                          let show_warnings = true;
                          self.emit_log_messages(&unit, build_runner, show_warnings)?;
                          self.back_compat_notice(build_runner, &unit)?;
-@@ -762,11 +835,207 @@ impl<'gctx> DrainState<'gctx> {
+@@ -762,11 +840,207 @@ impl<'gctx> DrainState<'gctx> {
              Message::SectionTiming(id, section) => {
                  self.timings.unit_section_timing(build_runner, id, &section);
              }
@@ -554,7 +578,7 @@ index a581e11..fe9add9 100644
      // This will also tick the progress bar as appropriate
      fn wait_for_events(&mut self) -> Vec<Message> {
          // Drain all events at once to avoid displaying the progress bar
-@@ -779,7 +1048,7 @@ impl<'gctx> DrainState<'gctx> {
+@@ -779,7 +1053,7 @@ impl<'gctx> DrainState<'gctx> {
          if events.is_empty() {
              loop {
                  self.tick_progress();
@@ -563,7 +587,7 @@ index a581e11..fe9add9 100644
                  match self.messages.pop(Duration::from_millis(500)) {
                      Some(message) => {
                          events.push(message);
-@@ -843,6 +1112,9 @@ impl<'gctx> DrainState<'gctx> {
+@@ -843,6 +1117,9 @@ impl<'gctx> DrainState<'gctx> {
                  if let Err(event_err) = self.handle_event(build_runner, event) {
                      self.handle_error(&mut build_runner.bcx.gctx.shell(), &mut errors, event_err);
                  }
@@ -573,7 +597,7 @@ index a581e11..fe9add9 100644
              }
          }
          self.progress.clear();
-@@ -926,7 +1198,13 @@ impl<'gctx> DrainState<'gctx> {
+@@ -926,7 +1203,13 @@ impl<'gctx> DrainState<'gctx> {
          let new_err = new_err.into();
          if new_err.print_always || err_state.count == 0 {
              crate::display_error(&new_err.error, shell);
@@ -588,7 +612,7 @@ index a581e11..fe9add9 100644
                  self.progress.indicate_error();
                  let _ = shell.warn("build failed, waiting for other jobs to finish...");
              }
-@@ -1003,6 +1281,22 @@ impl<'gctx> DrainState<'gctx> {
+@@ -1003,6 +1286,22 @@ impl<'gctx> DrainState<'gctx> {
          debug!("start {}: {:?}", id, unit);
  
          assert!(self.active.insert(id, unit.clone()).is_none());
@@ -611,7 +635,7 @@ index a581e11..fe9add9 100644
  
          let messages = self.messages.clone();
          let is_fresh = job.freshness().is_fresh();
-@@ -1078,7 +1372,12 @@ impl<'gctx> DrainState<'gctx> {
+@@ -1078,7 +1377,12 @@ impl<'gctx> DrainState<'gctx> {
          let count = self.warning_count.entry(id).or_default();
          count.total += 1;
          if lint {
@@ -626,7 +650,7 @@ index a581e11..fe9add9 100644
              // don't fail compilation.
              if unit.is_local() {
 diff --git a/src/compiler/mod.rs b/src/compiler/mod.rs
-index fae7bab..754c834 100644
+index fae7bab..a1e3994 100644
 --- a/src/compiler/mod.rs
 +++ b/src/compiler/mod.rs
 @@ -395,6 +395,8 @@ fn rustc(
@@ -685,7 +709,7 @@ index fae7bab..754c834 100644
      if unit.mode.is_check() {
          cmd.arg("--emit=dep-info,metadata");
      } else if !build_runner
-@@ -2359,13 +2387,44 @@ fn on_stderr_line_inner(
+@@ -2359,13 +2387,46 @@ fn on_stderr_line_inner(
      struct ArtifactNotification<'a> {
          #[serde(borrow)]
          artifact: Cow<'a, str>,
@@ -724,6 +748,8 @@ index fae7bab..754c834 100644
 +                debug!("resumed");
 +                state.resumed();
 +            }
++            // Headstart: an rlib that paused dependents may be waiting for.
++            Some("link") => state.metadata_written(file_name(&artifact.artifact)),
 +            _ if artifact.artifact.ends_with(".rmeta") => {
 +                debug!("looks like metadata finished early!");
 +                state.metadata_written(file_name(&artifact.artifact));

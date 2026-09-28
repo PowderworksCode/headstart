@@ -43,7 +43,7 @@ index dbbf06818..7a54d9683 100644
          let def_kind = tcx.def_kind(item_def_id);
          // Make sure we evaluate all static and (non-associated) const items, even if unused.
 diff --git a/compiler/rustc_interface/src/passes.rs b/compiler/rustc_interface/src/passes.rs
-index da0ebce5b..a034cbd8a 100644
+index da0ebce5b..3dbd7e0d1 100644
 --- a/compiler/rustc_interface/src/passes.rs
 +++ b/compiler/rustc_interface/src/passes.rs
 @@ -892,6 +892,7 @@ pub fn write_interface<'tcx>(tcx: TyCtxt<'tcx>) {
@@ -150,7 +150,7 @@ index da0ebce5b..a034cbd8a 100644
  /// Runs the codegen backend, after which the AST and analysis can
  /// be discarded.
  pub(crate) fn start_codegen<'tcx>(
-@@ -1311,6 +1379,12 @@ pub(crate) fn start_codegen<'tcx>(
+@@ -1311,6 +1379,23 @@ pub(crate) fn start_codegen<'tcx>(
  
      info!("Pre-codegen\n{:?}", tcx.debug_stats());
  
@@ -158,13 +158,44 @@ index da0ebce5b..a034cbd8a 100644
 +    // dependencies that were loaded from early metadata.
 +    if tcx.sess.opts.output_types.should_codegen() {
 +        CStore::load_full_metadata(tcx);
++        // Cross-crate LTO reads dependencies' rlibs during code generation,
++        // not just when linking.
++        if matches!(
++            tcx.sess.lto(),
++            rustc_session::config::Lto::Fat | rustc_session::config::Lto::Thin
++        ) {
++            CStore::wait_for_rlibs(
++                tcx.sess,
++                tcx.crates(()).iter().map(|&cnum| &**tcx.used_crate_source(cnum)),
++            );
++        }
 +    }
 +
      let metadata = match rustc_metadata::fs::encode_and_write_metadata(tcx) {
          Ok(metadata) => metadata,
          Err(guar) => guar.raise_fatal(),
+diff --git a/compiler/rustc_interface/src/queries.rs b/compiler/rustc_interface/src/queries.rs
+index 759297bc6..ae0153678 100644
+--- a/compiler/rustc_interface/src/queries.rs
++++ b/compiler/rustc_interface/src/queries.rs
+@@ -164,6 +164,15 @@ pub fn link(
+             return;
+         }
+ 
++        // `-Zearly-metadata`: dependencies' rlibs may still be being written.
++        rustc_metadata::creader::CStore::wait_for_rlibs(
++            sess,
++            self.crate_info
++                .used_crates
++                .iter()
++                .map(|cnum| &*self.crate_info.used_crate_source[cnum]),
++        );
++
+         let _timer = sess.prof.verbose_generic_activity("link_crate");
+         let _timing = sess.timings.section_guard(sess.dcx(), TimingSection::Linking);
+         codegen_backend.link(
 diff --git a/compiler/rustc_metadata/src/creader.rs b/compiler/rustc_metadata/src/creader.rs
-index aea843ac0..5c9dcd5e4 100644
+index aea843ac0..9066e4e4e 100644
 --- a/compiler/rustc_metadata/src/creader.rs
 +++ b/compiler/rustc_metadata/src/creader.rs
 @@ -1,7 +1,7 @@
@@ -190,7 +221,7 @@ index aea843ac0..5c9dcd5e4 100644
      }
  
      pub(crate) fn get_crate_data_mut(&mut self, cnum: CrateNum) -> &mut CrateMetadata {
-@@ -265,9 +270,39 @@ pub fn resolved_extern_crate(&self, externs_name: Symbol) -> Option<CrateNum> {
+@@ -265,9 +270,63 @@ pub fn resolved_extern_crate(&self, externs_name: Symbol) -> Option<CrateNum> {
      }
  
      pub(crate) fn iter_crate_data(&self) -> impl Iterator<Item = (CrateNum, &CrateMetadata)> {
@@ -227,17 +258,42 @@ index aea843ac0..5c9dcd5e4 100644
 +            );
 +            data.set_full(tcx, blob, full_path);
 +        }
-+        pause.resume(tcx);
++        pause.resume(tcx.sess);
++    }
++
++    /// `-Zearly-metadata`: waits until the rlibs this crate links against
++    /// exist. A crate that links can start on its dependencies' metadata; the
++    /// locator then records where each dependency's rlib will be, and the
++    /// rlib is written (atomically) when that dependency finishes. Fails if a
++    /// dependency's early metadata is retracted first: it failed to compile.
++    pub fn wait_for_rlibs<'a>(sess: &Session, sources: impl IntoIterator<Item = &'a CrateSource>) {
++        let mut pause = Pause::default();
++        for source in sources {
++            let Some(rlib) = &source.rlib else { continue };
++            let early = rlib.with_extension(crate::fs::EARLY_METADATA_EXTENSION);
++            while !rlib.exists() {
++                if !early.exists() {
++                    sess.dcx().fatal(format!(
++                        "a dependency failed to compile, or its rlib `{}` is missing",
++                        rlib.display()
++                    ));
++                }
++                pause.pause(sess, rlib);
++                std::thread::sleep(std::time::Duration::from_millis(10));
++            }
++        }
++        pause.resume(sess);
      }
  
      pub fn all_proc_macro_def_ids(&self, tcx: TyCtxt<'_>) -> impl Iterator<Item = DefId> {
-@@ -1425,3 +1460,75 @@ fn visit_item(&mut self, item: &'ast ast::Item) {
+@@ -1425,3 +1484,76 @@ fn visit_item(&mut self, item: &'ast ast::Item) {
      visit::walk_crate(&mut f, krate);
      f.spans
  }
 +
-+/// While this compilation waits for dependencies' full metadata, it tells the
-+/// build tool (a `wait-metadata` artifact notification naming the file), which
++/// While this compilation waits for dependencies' full metadata or rlibs, it
++/// tells the build tool (a `wait-metadata` artifact notification naming the
++/// file), which
 +/// can give its job slot to other work. To resume, it takes a jobserver token
 +/// and then says so (`resume`); the build tool returns that token to the
 +/// jobserver when the compilation finishes, and gives freed tokens to paused
@@ -248,25 +304,25 @@ index aea843ac0..5c9dcd5e4 100644
 +}
 +
 +impl Pause {
-+    fn pause(&mut self, tcx: TyCtxt<'_>, waiting_for: &Path) {
++    fn pause(&mut self, sess: &Session, waiting_for: &Path) {
 +        if self.paused {
 +            return;
 +        }
 +        self.paused = true;
-+        if tcx.sess.opts.json_artifact_notifications {
-+            tcx.dcx().emit_artifact_notification(waiting_for, "wait-metadata");
++        if sess.opts.json_artifact_notifications {
++            sess.dcx().emit_artifact_notification(waiting_for, "wait-metadata");
 +        }
 +    }
 +
-+    fn resume(&mut self, tcx: TyCtxt<'_>) {
++    fn resume(&mut self, sess: &Session) {
 +        if !self.paused {
 +            return;
 +        }
 +        self.paused = false;
 +        // Only a build tool that follows the notifications gave this slot away.
-+        if tcx.sess.opts.json_artifact_notifications {
++        if sess.opts.json_artifact_notifications {
 +            rustc_data_structures::jobserver::client().acquire_raw().ok();
-+            tcx.dcx().emit_artifact_notification(Path::new(""), "resume");
++            sess.dcx().emit_artifact_notification(Path::new(""), "resume");
 +        }
 +    }
 +}
@@ -303,12 +359,12 @@ index aea843ac0..5c9dcd5e4 100644
 +                early_path.display()
 +            ));
 +        }
-+        pause.pause(tcx, &full_path);
++        pause.pause(tcx.sess, &full_path);
 +        std::thread::sleep(std::time::Duration::from_millis(10));
 +    }
 +}
 diff --git a/compiler/rustc_metadata/src/fs.rs b/compiler/rustc_metadata/src/fs.rs
-index ed177708f..3b8cffecf 100644
+index ed177708f..b7d484afb 100644
 --- a/compiler/rustc_metadata/src/fs.rs
 +++ b/compiler/rustc_metadata/src/fs.rs
 @@ -14,7 +14,7 @@
@@ -320,7 +376,7 @@ index ed177708f..3b8cffecf 100644
  
  // FIXME(eddyb) maybe include the crate name in this?
  pub const METADATA_FILENAME: &str = "lib.rmeta";
-@@ -117,6 +117,49 @@ pub fn encode_and_write_metadata(tcx: TyCtxt<'_>) -> Result<EncodedMetadata, Err
+@@ -117,6 +117,52 @@ pub fn encode_and_write_metadata(tcx: TyCtxt<'_>) -> Result<EncodedMetadata, Err
      Ok(metadata)
  }
  
@@ -336,16 +392,19 @@ index ed177708f..3b8cffecf 100644
 +/// will go, and announces it with an `early-metadata` artifact notification.
 +/// Returns where it was written.
 +///
-+/// Full metadata left over from an earlier compilation is deleted first, so
-+/// that from here on, a full metadata file that exists is this
-+/// compilation's: dependents started on the early metadata can simply wait
-+/// for it to appear.
++/// Full metadata and an rlib left over from an earlier compilation are deleted
++/// first, so that from here on, one that exists is this compilation's:
++/// dependents started on the early metadata can simply wait for it to
++/// appear.
 +pub fn encode_and_write_early_metadata(tcx: TyCtxt<'_>) -> Option<PathBuf> {
 +    let OutFileName::Real(out_filename) = filename_for_metadata(tcx.sess, tcx.output_filenames(()))
 +    else {
 +        return None;
 +    };
 +    let _ = fs::remove_file(&out_filename);
++    if tcx.crate_types().contains(&CrateType::Rlib) {
++        let _ = fs::remove_file(out_filename.with_extension("rlib"));
++    }
 +    let early_filename = early_metadata_path(&out_filename);
 +    // Written elsewhere and renamed into place, as for full metadata.
 +    let metadata_tmpdir = TempDirBuilder::new()
@@ -384,7 +443,7 @@ index dd963fc87..a5065a32c 100644
 +    rendered_const,
 +};
 diff --git a/compiler/rustc_metadata/src/locator.rs b/compiler/rustc_metadata/src/locator.rs
-index 38da6561e..295cb3027 100644
+index 38da6561e..2c4417304 100644
 --- a/compiler/rustc_metadata/src/locator.rs
 +++ b/compiler/rustc_metadata/src/locator.rs
 @@ -237,6 +237,7 @@
@@ -460,7 +519,31 @@ index 38da6561e..295cb3027 100644
          // Order here matters, rmeta should come first.
          //
          // Make sure there's at most one rlib and at most one dylib.
-@@ -547,6 +578,14 @@ fn extract_lib(
+@@ -543,10 +574,38 @@ fn extract_lib(
+             return Err(CrateError::FullMetadataNotFound(self.crate_name, CrateFlavor::SDylib));
+         }
+ 
++        // `-Zearly-metadata`: a crate that links, started on a dependency's
++        // metadata, links against its rlib next to it, which may not be
++        // written yet. It waits for it before linking (see
++        // `CStore::wait_for_rlibs`).
++        let rlib = match (&rlib, &dylib, &rmeta) {
++            (None, None, Some(rmeta))
++                if self.accept_early_metadata
++                    && !self.only_needs_metadata
++                    && !self.is_proc_macro =>
++            {
++                let full = if is_early_metadata(rmeta) {
++                    full_metadata_path(rmeta)
++                } else {
++                    rmeta.clone()
++                };
++                Some(full.with_extension("rlib"))
++            }
++            _ => rlib,
++        };
++
+         let source = CrateSource { rmeta, rlib, dylib, sdylib_interface };
          Ok(slot.map(|(svh, metadata, _, _)| (svh, Library { source, metadata })))
      }
  
@@ -475,7 +558,7 @@ index 38da6561e..295cb3027 100644
      fn needs_crate_flavor(&self, flavor: CrateFlavor) -> bool {
          if flavor == CrateFlavor::Dylib && self.is_proc_macro {
              return true;
-@@ -752,6 +791,19 @@ fn find_commandline_library(
+@@ -752,6 +811,19 @@ fn find_commandline_library(
          let mut dylibs = FxIndexSet::default();
          let mut sdylib_interfaces = FxIndexSet::default();
          for loc in &self.exact_paths {
@@ -495,7 +578,7 @@ index 38da6561e..295cb3027 100644
              let loc_canon = loc.canonicalized();
              let loc_orig = loc.original();
              if !loc_canon.exists() {
-@@ -774,7 +826,7 @@ fn find_commandline_library(
+@@ -774,7 +846,7 @@ fn find_commandline_library(
                      rlibs.insert(loc_canon.clone());
                      continue;
                  }
@@ -504,7 +587,7 @@ index 38da6561e..295cb3027 100644
                      rmetas.insert(loc_canon.clone());
                      continue;
                  }
-@@ -814,7 +866,7 @@ pub(crate) fn into_error(
+@@ -814,7 +886,7 @@ pub(crate) fn into_error(
      }
  }
  
@@ -513,7 +596,7 @@ index 38da6561e..295cb3027 100644
      target: &Target,
      flavor: CrateFlavor,
      filename: &'p Path,
-@@ -973,13 +1025,23 @@ fn get_flavor_from_path(path: &Path) -> CrateFlavor {
+@@ -973,13 +1045,23 @@ fn get_flavor_from_path(path: &Path) -> CrateFlavor {
  
      if filename.ends_with(".rlib") {
          CrateFlavor::Rlib
