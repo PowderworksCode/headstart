@@ -4,5 +4,5 @@
 lines = ["pub struct Widget(pub u64);", "", "pub fn make() -> Widget { Widget(busy_0()) }", ""]
 for i in range(80):
     chain = "(0..10u64)" + "".join(f".map(|x| x.wrapping_mul({j + 3}).wrapping_add({i}))" for j in range(40))
-    lines.append(f"pub fn busy_{i}() -> u64 {{ {chain}.sum() }}")
+    lines.append(f"pub fn busy_{i}() -> u64 {{ {chain}.fold(0, u64::wrapping_add) }}")
 open("slow/src/lib.rs", "w").write("\n".join(lines) + "\n")

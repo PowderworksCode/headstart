@@ -1,9 +1,14 @@
 #!/usr/bin/env bash
 # Checks headstart under incremental compilation: runs one sequence of
 # edits to a copy of tests/errors twice, with headstart off and on, each in
-# its own directory, and compares `cargo check`'s output after every step.
-# Finally compares both against a clean build of the last state.
+# its own directory, and compares the output after every step. Finally
+# compares both against a clean build of the last state.
+#
+#   scripts/check-incremental.sh [check|build]
+#
+# With `build`, each step also runs the built binary.
 set -uo pipefail
+command=${1:-check}
 root="$(cd "$(dirname "$0")/.." && pwd)"
 export RUSTC=$root/rustc/build/host/stage1/bin/rustc RUSTC_WRAPPER= CARGO_INCREMENTAL=1
 cargo=$root/cargo/target/release/cargo
@@ -17,9 +22,10 @@ step() { # <name> <edit command, run in the workspace>
   local name=$1 edit=$2 mode out
   for mode in 0 1; do
     (cd "$tmp/ws$mode" && eval "$edit" && sleep 1 &&
-      CARGO_HEADSTART=$mode "$cargo" check --color never --message-format short 2>&1 |
-        grep -v -e '^ *Checking ' -e '^ *Finished ' > "$tmp/$name.$mode"
-      echo "exit ${PIPESTATUS[0]}" >> "$tmp/$name.$mode")
+      CARGO_HEADSTART=$mode "$cargo" $command --color never --message-format short 2>&1 |
+        grep -v -e '^ *Checking ' -e '^ *Compiling ' -e '^ *Finished ' -e '^ *Blocking ' -e 'build failed, waiting for other jobs' > "$tmp/$name.$mode"
+      echo "exit ${PIPESTATUS[0]}" >> "$tmp/$name.$mode"
+      if [ $command = build ] && [ -x target/debug/app ]; then target/debug/app >> "$tmp/$name.$mode" 2>&1; fi)
   done
   if diff -q "$tmp/$name.0" "$tmp/$name.1" >/dev/null && ! grep -q "panicked\|internal compiler error" "$tmp/$name.1"; then
     echo "same   $name ($(tail -1 "$tmp/$name.1"))"
@@ -42,8 +48,9 @@ step touch-all "touch slow/src/lib.rs mid/src/lib.rs app/src/main.rs"
 
 # The final incremental state against a clean build of the same sources.
 for mode in 0 1; do
-  (cd "$tmp/ws$mode" && rm -rf target && CARGO_HEADSTART=$mode "$cargo" check --color never --message-format short 2>&1 |
-    grep -v -e '^ *Checking ' -e '^ *Finished ' > "$tmp/clean.$mode"; echo "exit ${PIPESTATUS[0]}" >> "$tmp/clean.$mode")
+  (cd "$tmp/ws$mode" && rm -rf target && CARGO_HEADSTART=$mode "$cargo" $command --color never --message-format short 2>&1 |
+    grep -v -e '^ *Checking ' -e '^ *Compiling ' -e '^ *Finished ' -e '^ *Blocking ' -e 'build failed, waiting for other jobs' > "$tmp/clean.$mode"; echo "exit ${PIPESTATUS[0]}" >> "$tmp/clean.$mode"
+    if [ $command = build ] && [ -x target/debug/app ]; then target/debug/app >> "$tmp/clean.$mode" 2>&1; fi)
 done
 if diff -q "$tmp/clean.0" "$tmp/touch-all.1" >/dev/null && diff -q "$tmp/clean.1" "$tmp/touch-all.1" >/dev/null; then
   echo "same   final state vs clean build"

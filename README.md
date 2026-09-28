@@ -2,13 +2,20 @@
 
 Start dependent crates before their dependencies finish type-checking.
 
-In a `cargo check` build, each crate waits for every crate it depends on
-to be fully checked, function bodies included. It doesn't need those
-bodies: it compiles against the dependency's interface, the metadata in
-its `.rmeta` file. Headstart makes rustc write that metadata as soon as
-the interface is checked, and makes cargo start dependents on it. Each
-crate's bodies are checked while the crates downstream are already
+Every crate waits for the crates it depends on to be fully checked,
+function bodies included, before it starts. It doesn't need those bodies
+to type-check itself. It compiles against the dependency's interface, the
+metadata in its `.rmeta` file.
+
+Headstart makes rustc write an early metadata file as soon as the
+interface is checked, and makes cargo start dependents on it. Each
+crate's bodies are then checked while the crates downstream are already
 compiling.
+
+- **`cargo check`:** dependents run to completion on early metadata.
+- **`cargo build`:** dependents do all their analysis on early metadata,
+  then wait for the dependency's full metadata before generating code.
+  While they wait, they give their job slot back.
 
 If a body has an error, the build still fails with that error, and prints
 exactly what it prints today. Cargo reports a crate's output only once all
@@ -17,14 +24,20 @@ only cost is work done downstream that gets thrown away.
 
 ## Pieces
 
-- **rustc, `-Zearly-metadata`** ([patches/rustc](patches/rustc)): splits
-  type-checking into interfaces and bodies, and writes the metadata in
-  between.
-- **cargo, `CARGO_HEADSTART=1`** ([patches/cargo](patches/cargo)):
-  pipelines `cargo check` the way cargo already pipelines `cargo build`,
-  and passes `-Zearly-metadata` to crates that have dependents.
+- **rustc, `-Zearly-metadata`** ([patch](patches/rustc)):
+  - a new `analysis_interfaces` query splits analysis into item
+    interfaces and function bodies;
+  - the driver writes `.early-rmeta` between the two;
+  - crate loading accepts early metadata, and swaps in full metadata
+    before code generation, pausing for it if necessary.
+- **cargo, `CARGO_HEADSTART=1`** ([patch](patches/cargo)):
+  - passes `-Zearly-metadata` to every compile;
+  - starts dependents on the early-metadata notification, in both
+    `check` and `build`;
+  - tells waiting dependents when a crate fails;
+  - reports a crate's output only when its dependencies succeeded.
 
-How it works, what the early metadata leaves out, and the risks:
+How it works, what early metadata leaves out, and the risks:
 [docs/design.md](docs/design.md). Measurements:
 [docs/results.md](docs/results.md).
 
@@ -39,7 +52,7 @@ Then, in any Rust project:
 ```sh
 RUSTC=/path/to/headstart/rustc/build/host/stage1/bin/rustc \
 CARGO_HEADSTART=1 \
-  /path/to/headstart/cargo/target/release/cargo check
+  /path/to/headstart/cargo/target/release/cargo check   # or build
 ```
 
 With `CARGO_HEADSTART` unset, the patched cargo behaves like upstream, so
@@ -50,23 +63,25 @@ library takes several seconds to check, almost all of it in function
 bodies. With headstart on, `app` starts about 0.2 s in instead of
 waiting for `slow` to finish.
 
-`scripts/check-errors.sh` checks the claim about errors on `tests/errors`. It builds
-three scenarios (a clean build, an error in a dependency, an error in the
-binary) with headstart off and on. It then compares the human-readable
-output, the JSON output and the exit status.
+`scripts/check-errors.sh` checks the claim about errors on
+`tests/errors`. It runs three scenarios (a clean build, an error in a
+dependency, an error in the binary) with `cargo check` and `cargo build`,
+headstart off and on. It then compares the human-readable output, the
+JSON output, the exit status and what the built binary prints.
 
-`scripts/check-incremental.sh` does the same across a sequence of
-incremental edits. The steps include adding an `impl Fn` a dependent
-calls, and breaking and then fixing an interface. It also compares the
-final state against a clean build.
+`scripts/check-incremental.sh [check|build]` does the same across a
+sequence of incremental edits. The steps include adding an `impl Fn` a
+dependent calls, and breaking and then fixing an interface. It also
+compares the final state against a clean build.
 
 ## Benchmarks
 
 ```sh
-scripts/bench.sh -n 5 path/to/project ...
+scripts/bench.sh -n 5 [-c build] path/to/project ...
 ```
 
-This times clean `cargo check` builds, alternating headstart off and on,
+This times clean `cargo check` (or `cargo build`) builds, alternating
+headstart off and on,
 and prints the medians. `scripts/bench-mem.sh` measures peak memory the
 same way. `scripts/bench-incremental.sh` times incremental rechecks after
 editing one function body. `scripts/log-rustc` records when each rustc run

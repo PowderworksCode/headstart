@@ -40,10 +40,28 @@ index 4bf69f6..ec435fb 100644
 +    *ON
 +}
 diff --git a/src/compiler/job_queue/job_state.rs b/src/compiler/job_queue/job_state.rs
-index b866821..ab8d5c8 100644
+index b866821..d0794f3 100644
 --- a/src/compiler/job_queue/job_state.rs
 +++ b/src/compiler/job_queue/job_state.rs
-@@ -88,7 +88,7 @@ impl<'a, 'gctx> JobState<'a, 'gctx> {
+@@ -50,6 +50,9 @@ pub struct JobState<'a, 'gctx> {
+     /// sending a double message later on.
+     rmeta_required: Cell<bool>,
+ 
++    /// Whether `rmeta_produced` has released this unit's dependents already.
++    rmeta_announced: Cell<bool>,
++
+     /// Manages locks for build units when fine grain locking is enabled.
+     lock_manager: Arc<LockManager>,
+ 
+@@ -74,6 +77,7 @@ impl<'a, 'gctx> JobState<'a, 'gctx> {
+             messages,
+             output,
+             rmeta_required: Cell::new(rmeta_required),
++            rmeta_announced: Cell::new(false),
+             lock_manager,
+             warning_handling,
+             _marker: marker::PhantomData,
+@@ -88,7 +92,7 @@ impl<'a, 'gctx> JobState<'a, 'gctx> {
          if let Some(dedupe) = self.output {
              writeln!(dedupe.gctx.shell().out(), "{}", stdout)?;
          } else {
@@ -52,7 +70,7 @@ index b866821..ab8d5c8 100644
          }
          Ok(())
      }
-@@ -99,7 +99,7 @@ impl<'a, 'gctx> JobState<'a, 'gctx> {
+@@ -99,7 +103,7 @@ impl<'a, 'gctx> JobState<'a, 'gctx> {
              shell.print_ansi_stderr(stderr.as_bytes())?;
              shell.err().write_all(b"\n")?;
          } else {
@@ -61,6 +79,18 @@ index b866821..ab8d5c8 100644
          }
          Ok(())
      }
+@@ -150,6 +154,11 @@ impl<'a, 'gctx> JobState<'a, 'gctx> {
+     /// This should only be called once because a metadata file can only be
+     /// produced once!
+     pub fn rmeta_produced(&self) {
++        // With headstart, rustc announces early and then full metadata;
++        // dependents are released on the first.
++        if self.rmeta_announced.replace(true) {
++            return;
++        }
+         self.rmeta_required.set(false);
+         self.messages
+             .push(Message::Finish(self.id, Artifact::Metadata, Ok(())));
 diff --git a/src/compiler/job_queue/mod.rs b/src/compiler/job_queue/mod.rs
 index a581e11..b9cca0e 100644
 --- a/src/compiler/job_queue/mod.rs
@@ -458,16 +488,96 @@ index a581e11..b9cca0e 100644
              // don't fail compilation.
              if unit.is_local() {
 diff --git a/src/compiler/mod.rs b/src/compiler/mod.rs
-index fae7bab..07849ac 100644
+index fae7bab..9d49c28 100644
 --- a/src/compiler/mod.rs
 +++ b/src/compiler/mod.rs
-@@ -1348,6 +1348,9 @@ fn build_base_args(
+@@ -395,6 +395,8 @@ fn rustc(
+         output_options.show_diagnostics = false;
+     }
+     let env_config = Arc::clone(build_runner.bcx.gctx.env_config()?);
++    let headstart = build_runner.headstart_enabled();
++
+     return Ok(Work::new(move |state| {
+         // Artifacts are in a different location than typical units,
+         // hence we must assure the crate- and target-dependent
+@@ -452,6 +454,22 @@ fn rustc(
+             }
+         }
  
++        // Headstart: dependents that started on this unit's early metadata
++        // wait for its full metadata before code generation. If this unit
++        // fails, a marker next to it tells them it won't come.
++        let failed_markers: Vec<PathBuf> = if headstart {
++            outputs
++                .iter()
++                .filter(|output| output.path.extension() == Some(OsStr::new("rmeta")))
++                .map(|output| root.join(&output.path).with_extension("failed-rmeta"))
++                .collect()
++        } else {
++            Vec::new()
++        };
++        for marker in &failed_markers {
++            let _ = paths::remove_file(marker);
++        }
++
+         state.running(&rustc);
+         let timestamp = paths::set_invocation_time(&fingerprint_dir)?;
+         if let Some(sbom) = sbom {
+@@ -514,6 +532,12 @@ fn rustc(
+                 format!("could not compile {name}{errors}{warnings}")
+             });
+ 
++        if result.is_err() {
++            for marker in &failed_markers {
++                let _ = paths::write(marker, "");
++            }
++        }
++
+         if let Err(e) = result {
+             if let Some(diagnostic) = failed_scrape_diagnostic {
+                 state.warning(diagnostic);
+@@ -1346,6 +1370,12 @@ fn build_base_args(
+         }
+     }
+ 
++    // Headstart: rustc writes early metadata for dependents to start on, and
++    // loads dependencies from theirs, waiting for full metadata before code
++    // generation.
++    if build_runner.headstart_enabled() {
++        cmd.arg("-Zearly-metadata");
++    }
      if unit.mode.is_check() {
          cmd.arg("--emit=dep-info,metadata");
-+        if build_runner.headstart_enabled() && build_runner.rmeta_required(unit) {
-+            cmd.arg("-Zearly-metadata");
-+        }
      } else if !build_runner
-         .bcx
-         .target_data
+@@ -2359,13 +2389,28 @@ fn on_stderr_line_inner(
+     struct ArtifactNotification<'a> {
+         #[serde(borrow)]
+         artifact: Cow<'a, str>,
++        #[serde(borrow, default)]
++        emit: Option<Cow<'a, str>>,
+     }
+ 
+     if let Ok(artifact) = serde_json::from_str::<ArtifactNotification<'_>>(compiler_message.get()) {
+         trace!("found directive from rustc: `{}`", artifact.artifact);
+-        if artifact.artifact.ends_with(".rmeta") {
+-            debug!("looks like metadata finished early!");
+-            state.rmeta_produced();
++        match artifact.emit.as_deref() {
++            // Headstart: early metadata (`-Zearly-metadata`) is enough for
++            // dependents to start; full metadata follows.
++            Some("early-metadata") => {
++                debug!("early metadata written");
++                state.rmeta_produced();
++            }
++            // Headstart: rustc paused before code generation, waiting for a
++            // dependency's full metadata, with its jobserver token handed back.
++            Some("wait-metadata") => debug!("waiting for `{}`", artifact.artifact),
++            Some("resume") => debug!("resumed"),
++            _ if artifact.artifact.ends_with(".rmeta") => {
++                debug!("looks like metadata finished early!");
++                state.rmeta_produced();
++            }
++            _ => {}
+         }
+         return Ok(false);
+     }

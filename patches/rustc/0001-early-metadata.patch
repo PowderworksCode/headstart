@@ -1,3 +1,16 @@
+diff --git a/compiler/rustc_driver_impl/src/lib.rs b/compiler/rustc_driver_impl/src/lib.rs
+index 210f04a11..ba20d1816 100644
+--- a/compiler/rustc_driver_impl/src/lib.rs
++++ b/compiler/rustc_driver_impl/src/lib.rs
+@@ -313,6 +313,8 @@ pub fn run_compiler(at_args: &[String], callbacks: &mut (dyn Callbacks + Send))
+                 return None;
+             }
+ 
++            passes::write_early_metadata(tcx);
++
+             tcx.ensure_ok().analysis(());
+ 
+             if callbacks.after_analysis(compiler, tcx) == Compilation::Stop {
 diff --git a/compiler/rustc_hir_analysis/src/lib.rs b/compiler/rustc_hir_analysis/src/lib.rs
 index dbbf06818..7a54d9683 100644
 --- a/compiler/rustc_hir_analysis/src/lib.rs
@@ -30,46 +43,69 @@ index dbbf06818..7a54d9683 100644
          let def_kind = tcx.def_kind(item_def_id);
          // Make sure we evaluate all static and (non-associated) const items, even if unused.
 diff --git a/compiler/rustc_interface/src/passes.rs b/compiler/rustc_interface/src/passes.rs
-index da0ebce5b..18af4a9b7 100644
+index da0ebce5b..245ba40f3 100644
 --- a/compiler/rustc_interface/src/passes.rs
 +++ b/compiler/rustc_interface/src/passes.rs
-@@ -1143,7 +1143,14 @@ fn run_required_analyses(tcx: TyCtxt<'_>) {
+@@ -892,6 +892,7 @@ pub fn write_interface<'tcx>(tcx: TyCtxt<'tcx>) {
+ 
+ pub static DEFAULT_QUERY_PROVIDERS: LazyLock<Providers> = LazyLock::new(|| {
+     let providers = &mut Providers::default();
++    providers.queries.analysis_interfaces = analysis_interfaces;
+     providers.queries.analysis = analysis;
+     providers.queries.resolver_for_lowering_raw = resolver_for_lowering_raw;
+     providers.queries.stripped_cfg_items = |tcx, _| &tcx.resolutions(()).stripped_cfg_items[..];
+@@ -1088,9 +1089,9 @@ pub fn emit_delayed_lints(tcx: TyCtxt<'_>) {
+     }
+ }
+ 
+-/// Runs all analyses that we guarantee to run, even if errors were reported in earlier analyses.
+-/// This function never fails.
+-fn run_required_analyses(tcx: TyCtxt<'_>) {
++/// Runs the required analyses up to and including the item interface checks,
++/// before any function body is type-checked. See the `analysis_interfaces` query.
++fn analysis_interfaces(tcx: TyCtxt<'_>, (): ()) {
+     if tcx.sess.opts.unstable_opts.input_stats {
+         rustc_passes::input_stats::print_hir_stats(tcx);
+     }
+@@ -1143,7 +1144,16 @@ fn run_required_analyses(tcx: TyCtxt<'_>) {
          emit_delayed_lints(tcx);
      });
  
 -    rustc_hir_analysis::check_crate(tcx);
-+    {
-+        let _prof_timer = tcx.sess.timer("type_check_crate");
-+        rustc_hir_analysis::check_crate_interfaces(tcx);
-+        if tcx.sess.opts.unstable_opts.early_metadata {
-+            write_early_metadata(tcx);
-+        }
-+        rustc_hir_analysis::check_crate_bodies(tcx);
-+    }
++    let _prof_timer = tcx.sess.timer("type_check_crate_interfaces");
++    rustc_hir_analysis::check_crate_interfaces(tcx);
++}
++
++/// Runs all analyses that we guarantee to run, even if errors were reported in earlier analyses.
++/// This function never fails.
++fn run_required_analyses(tcx: TyCtxt<'_>) {
++    let sess = tcx.sess;
++    tcx.ensure_ok().analysis_interfaces(());
++    sess.time("type_check_crate_bodies", || rustc_hir_analysis::check_crate_bodies(tcx));
      // Freeze definitions as we don't add new ones at this point.
      // We need to wait until now since we synthesize a by-move body
      // for all coroutine-closures.
-@@ -1281,6 +1288,50 @@ fn analysis(tcx: TyCtxt<'_>, (): ()) {
+@@ -1281,6 +1291,43 @@ fn analysis(tcx: TyCtxt<'_>, (): ()) {
      }
  }
  
-+/// Metadata written by [`write_early_metadata`], for [`start_codegen`] to use
-+/// instead of encoding it again.
-+static EARLY_METADATA: std::sync::Mutex<Option<EncodedMetadata>> = std::sync::Mutex::new(None);
-+
-+/// `-Zearly-metadata`: write the crate's metadata (and announce it, with
-+/// `--json=artifacts`) once item interfaces are checked, before function
-+/// bodies are, so a build tool can start dependent crates sooner. Whatever the
-+/// metadata needs from a body (an opaque type's hidden type, a const's value)
-+/// is computed on demand here. If a body fails to check later, compilation
-+/// still fails; the metadata was only ever an early promise.
-+fn write_early_metadata(tcx: TyCtxt<'_>) {
-+    // Only for metadata-only builds (`cargo check`): early metadata leaves out
-+    // what only codegen and linking read, so it must not go into an rlib.
-+    if !tcx.sess.opts.output_types.contains_key(&OutputType::Metadata)
-+        || tcx.sess.opts.output_types.should_codegen()
-+        || tcx.sess.dcx().has_errors_or_delayed_bugs().is_some()
++/// `-Zearly-metadata`: once the crate's item interfaces are checked, and
++/// before its function bodies are, write early metadata (and announce it with
++/// `--json=artifacts`) so a build tool can start dependent crates. Whatever
++/// the interface needs from a body (an opaque type's hidden type, a const's
++/// value) is computed on demand. Full metadata is written as usual later. If a
++/// body fails to check, compilation still fails; the early metadata was only
++/// ever a promise.
++pub fn write_early_metadata(tcx: TyCtxt<'_>) {
++    // Crates nothing can depend on (binaries) write empty metadata.
++    if !tcx.sess.opts.unstable_opts.early_metadata
++        || !tcx.sess.opts.output_types.contains_key(&OutputType::Metadata)
++        || !tcx.needs_metadata()
 +    {
++        return;
++    }
++    tcx.ensure_ok().analysis_interfaces(());
++    if tcx.sess.dcx().has_errors_or_delayed_bugs().is_some() {
 +        return;
 +    }
 +    // Encoding freezes the definitions table, so first create the
@@ -87,46 +123,499 @@ index da0ebce5b..18af4a9b7 100644
 +    if tcx.sess.dcx().has_errors_or_delayed_bugs().is_some() {
 +        return;
 +    }
-+    tcx.sess.encoding_early_metadata.store(true, std::sync::atomic::Ordering::Relaxed);
-+    // Metadata encoding runs outside dependency tracking, as it does after
-+    // `analysis`; with incremental compilation it tracks itself as a task.
-+    let encoded = tcx.dep_graph.with_ignore(|| rustc_metadata::fs::encode_and_write_metadata(tcx));
-+    tcx.sess.encoding_early_metadata.store(false, std::sync::atomic::Ordering::Relaxed);
-+    if let Ok(metadata) = encoded {
-+        *EARLY_METADATA.lock().unwrap() = Some(metadata);
-+    }
++    rustc_metadata::fs::encode_and_write_early_metadata(tcx);
 +}
 +
  /// Runs the codegen backend, after which the AST and analysis can
  /// be discarded.
  pub(crate) fn start_codegen<'tcx>(
-@@ -1311,9 +1362,13 @@ pub(crate) fn start_codegen<'tcx>(
+@@ -1311,6 +1358,12 @@ pub(crate) fn start_codegen<'tcx>(
  
      info!("Pre-codegen\n{:?}", tcx.debug_stats());
  
--    let metadata = match rustc_metadata::fs::encode_and_write_metadata(tcx) {
--        Ok(metadata) => metadata,
--        Err(guar) => guar.raise_fatal(),
-+    let early = EARLY_METADATA.lock().unwrap().take();
-+    let metadata = match early {
-+        Some(metadata) => metadata,
-+        None => match rustc_metadata::fs::encode_and_write_metadata(tcx) {
-+            Ok(metadata) => metadata,
-+            Err(guar) => guar.raise_fatal(),
-+        },
-     };
++    // `-Zearly-metadata`: code generation needs the full metadata of
++    // dependencies that were loaded from early metadata.
++    if tcx.sess.opts.output_types.should_codegen() {
++        CStore::load_full_metadata(tcx);
++    }
++
+     let metadata = match rustc_metadata::fs::encode_and_write_metadata(tcx) {
+         Ok(metadata) => metadata,
+         Err(guar) => guar.raise_fatal(),
+diff --git a/compiler/rustc_metadata/src/creader.rs b/compiler/rustc_metadata/src/creader.rs
+index aea843ac0..f15524dfc 100644
+--- a/compiler/rustc_metadata/src/creader.rs
++++ b/compiler/rustc_metadata/src/creader.rs
+@@ -1,7 +1,7 @@
+ //! Validates all used crates and extern libraries and loads their metadata
  
-     let is_host_metadata = tcx
+ use std::collections::BTreeMap;
+-use std::path::Path;
++use std::path::{Path, PathBuf};
+ use std::str::FromStr;
+ use std::{cmp, env, iter};
+ 
+@@ -235,7 +235,12 @@ pub fn has_crate_data(&self, cnum: CrateNum) -> bool {
+     }
+ 
+     pub(crate) fn get_crate_data(&self, cnum: CrateNum) -> &CrateMetadata {
+-        self.metas[cnum].as_ref().unwrap_or_else(|| panic!("Failed to get crate data for {cnum:?}"))
++        let data = self.metas[cnum]
++            .as_ref()
++            .unwrap_or_else(|| panic!("Failed to get crate data for {cnum:?}"));
++        // A crate loaded from early metadata is decoded from its full metadata
++        // once that's loaded.
++        data.full().unwrap_or(data)
+     }
+ 
+     pub(crate) fn get_crate_data_mut(&mut self, cnum: CrateNum) -> &mut CrateMetadata {
+@@ -265,9 +270,39 @@ pub fn resolved_extern_crate(&self, externs_name: Symbol) -> Option<CrateNum> {
+     }
+ 
+     pub(crate) fn iter_crate_data(&self) -> impl Iterator<Item = (CrateNum, &CrateMetadata)> {
+-        self.metas
++        self.metas.iter_enumerated().filter_map(|(cnum, data)| {
++            data.as_deref().map(|data| (cnum, data.full().unwrap_or(data)))
++        })
++    }
++
++    /// `-Zearly-metadata`: loads the full metadata of every dependency loaded
++    /// from early metadata. Code generation needs it: the MIR of generic and
++    /// inline functions, exported symbols. Full metadata that isn't written
++    /// yet is waited for, with this process's jobserver token handed back
++    /// meanwhile (see [`wait_for_full_metadata`]).
++    pub fn load_full_metadata(tcx: TyCtxt<'_>) {
++        let cstore = CStore::from_tcx(tcx);
++        let early: Vec<CrateNum> = cstore
++            .metas
+             .iter_enumerated()
+             .filter_map(|(cnum, data)| data.as_deref().map(|data| (cnum, data)))
++            .filter(|(_, data)| data.is_early() && data.full().is_none())
++            .map(|(cnum, _)| cnum)
++            .collect();
++        let mut pause = Pause::default();
++        for cnum in early {
++            let data = cstore.metas[cnum].as_deref().unwrap();
++            let early_path = data.source().rmeta.clone().unwrap();
++            let (blob, full_path) = wait_for_full_metadata(
++                tcx,
++                &*cstore.metadata_loader,
++                &early_path,
++                data.hash(),
++                &mut pause,
++            );
++            data.set_full(tcx, blob, full_path);
++        }
++        pause.resume(tcx);
+     }
+ 
+     pub fn all_proc_macro_def_ids(&self, tcx: TyCtxt<'_>) -> impl Iterator<Item = DefId> {
+@@ -1425,3 +1460,77 @@ fn visit_item(&mut self, item: &'ast ast::Item) {
+     visit::walk_crate(&mut f, krate);
+     f.spans
+ }
++
++/// While this compilation waits for dependencies' full metadata, it hands its
++/// jobserver token back so the build tool can run other work, and announces it
++/// (a `wait-metadata` artifact notification). It takes a token again before
++/// resuming (a `resume` notification).
++#[derive(Default)]
++struct Pause {
++    paused: bool,
++}
++
++impl Pause {
++    fn pause(&mut self, tcx: TyCtxt<'_>, waiting_for: &Path) {
++        if self.paused {
++            return;
++        }
++        self.paused = true;
++        if tcx.sess.opts.json_artifact_notifications {
++            tcx.dcx().emit_artifact_notification(waiting_for, "wait-metadata");
++        }
++        // This gives up the token this process runs on, which the jobserver
++        // proxy never does; `resume` takes one back before any more work.
++        rustc_data_structures::jobserver::client().release_raw().ok();
++    }
++
++    fn resume(&mut self, tcx: TyCtxt<'_>) {
++        if !self.paused {
++            return;
++        }
++        self.paused = false;
++        rustc_data_structures::jobserver::client().acquire_raw().ok();
++        if tcx.sess.opts.json_artifact_notifications {
++            tcx.dcx().emit_artifact_notification(Path::new(""), "resume");
++        }
++    }
++}
++
++/// Waits until the full metadata of the crate whose early metadata is at
++/// `early_path` is written: a file with the same crate hash. (One left over
++/// from an earlier compilation with the same hash describes the same crate.)
++/// Fails if the build tool marks the crate as failed (a `.failed-rmeta` file,
++/// which it deletes whenever the crate starts compiling), since then it
++/// never will be.
++fn wait_for_full_metadata(
++    tcx: TyCtxt<'_>,
++    metadata_loader: &dyn MetadataLoader,
++    early_path: &Path,
++    hash: Svh,
++    pause: &mut Pause,
++) -> (MetadataBlob, PathBuf) {
++    let full_path = crate::locator::full_metadata_path(early_path);
++    let failed_path = full_path.with_extension("failed-rmeta");
++    loop {
++        // A file with another hash is stale, and will be replaced.
++        if let Ok(blob) = crate::locator::get_metadata_section(
++            &tcx.sess.target,
++            crate::locator::CrateFlavor::Rmeta,
++            &full_path,
++            metadata_loader,
++            tcx.sess.cfg_version,
++            None,
++        ) && blob.get_crate_hash() == hash
++        {
++            return (blob, full_path);
++        }
++        if failed_path.exists() {
++            tcx.dcx().fatal(format!(
++                "a dependency failed to compile after writing early metadata `{}`",
++                early_path.display()
++            ));
++        }
++        pause.pause(tcx, &full_path);
++        std::thread::sleep(std::time::Duration::from_millis(10));
++    }
++}
+diff --git a/compiler/rustc_metadata/src/fs.rs b/compiler/rustc_metadata/src/fs.rs
+index ed177708f..7144c6e88 100644
+--- a/compiler/rustc_metadata/src/fs.rs
++++ b/compiler/rustc_metadata/src/fs.rs
+@@ -14,7 +14,7 @@
+     BinaryOutputToTty, FailedCopyToStdout, FailedCreateEncodedMetadata, FailedCreateFile,
+     FailedCreateTempdir, FailedWriteError,
+ };
+-use crate::{EncodedMetadata, encode_metadata};
++use crate::{EncodedMetadata, encode_early_metadata, encode_metadata};
+ 
+ // FIXME(eddyb) maybe include the crate name in this?
+ pub const METADATA_FILENAME: &str = "lib.rmeta";
+@@ -117,6 +117,41 @@ pub fn encode_and_write_metadata(tcx: TyCtxt<'_>) -> Result<EncodedMetadata, Err
+     Ok(metadata)
+ }
+ 
++/// Where `-Zearly-metadata` writes early metadata for a crate whose full
++/// metadata goes to `rmeta`: `libfoo-hash.rmeta` becomes `libfoo-hash.early-rmeta`.
++pub fn early_metadata_path(rmeta: &Path) -> PathBuf {
++    rmeta.with_extension(EARLY_METADATA_EXTENSION)
++}
++
++pub const EARLY_METADATA_EXTENSION: &str = "early-rmeta";
++
++/// Writes early metadata (`-Zearly-metadata`) next to where the full metadata
++/// will go, and announces it with an `early-metadata` artifact notification.
++pub fn encode_and_write_early_metadata(tcx: TyCtxt<'_>) {
++    let OutFileName::Real(out_filename) = filename_for_metadata(tcx.sess, tcx.output_filenames(()))
++    else {
++        return;
++    };
++    let early_filename = early_metadata_path(&out_filename);
++    // Written elsewhere and renamed into place, as for full metadata.
++    let metadata_tmpdir = TempDirBuilder::new()
++        .prefix("rmeta")
++        .tempdir_in(out_filename.parent().unwrap_or_else(|| Path::new("")))
++        .unwrap_or_else(|err| tcx.dcx().emit_fatal(FailedCreateTempdir { err }));
++    let metadata_tmpdir = MaybeTempDir::new(metadata_tmpdir, tcx.sess.opts.cg.save_temps);
++    let tmp_filename = metadata_tmpdir.as_ref().join("early.rmeta");
++    encode_early_metadata(tcx, &tmp_filename);
++    if tcx.sess.dcx().has_errors_or_delayed_bugs().is_some() {
++        return;
++    }
++    if let Err(err) = non_durable_rename(&tmp_filename, &early_filename) {
++        tcx.dcx().emit_fatal(FailedWriteError { filename: early_filename, err });
++    }
++    if tcx.sess.opts.json_artifact_notifications {
++        tcx.dcx().emit_artifact_notification(&early_filename, "early-metadata");
++    }
++}
++
+ #[cfg(not(target_os = "linux"))]
+ pub fn non_durable_rename(src: &Path, dst: &Path) -> std::io::Result<()> {
+     std::fs::rename(src, dst)
+diff --git a/compiler/rustc_metadata/src/lib.rs b/compiler/rustc_metadata/src/lib.rs
+index dd963fc87..a5065a32c 100644
+--- a/compiler/rustc_metadata/src/lib.rs
++++ b/compiler/rustc_metadata/src/lib.rs
+@@ -27,4 +27,7 @@
+ 
+ pub use fs::{METADATA_FILENAME, emit_wrapper_file};
+ pub use host_dylib::{DylibError, load_symbol_from_dylib};
+-pub use rmeta::{EncodedMetadata, METADATA_HEADER, ProcMacroKind, encode_metadata, rendered_const};
++pub use rmeta::{
++    EncodedMetadata, METADATA_HEADER, ProcMacroKind, encode_early_metadata, encode_metadata,
++    rendered_const,
++};
+diff --git a/compiler/rustc_metadata/src/locator.rs b/compiler/rustc_metadata/src/locator.rs
+index 38da6561e..ef19c5611 100644
+--- a/compiler/rustc_metadata/src/locator.rs
++++ b/compiler/rustc_metadata/src/locator.rs
+@@ -237,6 +237,7 @@
+ 
+ use crate::creader::{Library, MetadataLoader};
+ use crate::diagnostics;
++use crate::fs::{EARLY_METADATA_EXTENSION, early_metadata_path};
+ use crate::rmeta::{METADATA_HEADER, MetadataBlob, ProcMacroKind, rustc_version};
+ 
+ #[derive(Clone)]
+@@ -256,6 +257,10 @@ pub(crate) struct CrateLocator<'a> {
+     filesearch: &'a FileSearch,
+     is_proc_macro: bool,
+     path_kind: PathKind,
++    /// `-Zearly-metadata`: a crate may also be loaded from early metadata
++    /// (`.early-rmeta`), written before its full metadata. See
++    /// [`CrateLocator::choose_metadata`].
++    accept_early_metadata: bool,
+ }
+ 
+ #[derive(Clone, Debug)]
+@@ -341,6 +346,7 @@ pub(crate) fn new(
+             filesearch: sess.target_filesearch(),
+             path_kind,
+             is_proc_macro: false,
++            accept_early_metadata: sess.opts.unstable_opts.early_metadata,
+         }
+     }
+ 
+@@ -431,12 +437,21 @@ fn find_library_crate(
+         // option and thus can be anything, and the incorrect match will be
+         // handled safely in `extract_one`.
+         let mut should_check_staticlibs = true;
++        let early_rmeta_suffix = &format!(".{EARLY_METADATA_EXTENSION}");
++        let early_rmeta = self.accept_early_metadata.then_some((
++            rmeta_prefix.as_str(),
++            early_rmeta_suffix.as_str(),
++            CrateFlavor::Rmeta,
++        ));
+         for (prefix, suffix, kind) in [
+             (rlib_prefix.as_str(), rlib_suffix, CrateFlavor::Rlib),
+             (rmeta_prefix.as_str(), rmeta_suffix, CrateFlavor::Rmeta),
+             (dylib_prefix, dylib_suffix, CrateFlavor::Dylib),
+             (interface_prefix, interface_suffix, CrateFlavor::SDylib),
+-        ] {
++        ]
++        .into_iter()
++        .chain(early_rmeta)
++        {
+             if prefix == staticlib_prefix && suffix == staticlib_suffix {
+                 should_check_staticlibs = false;
+             }
+@@ -528,6 +543,22 @@ fn extract_lib(
+         interfaces: FxIndexSet<PathBuf>,
+     ) -> Result<Option<(Svh, Library)>, CrateError> {
+         let mut slot = None;
++        // Of a crate's early and full metadata, keep the newer.
++        let rmetas = if self.accept_early_metadata {
++            let early: Vec<PathBuf> =
++                rmetas.iter().filter(|path| is_early_metadata(path)).cloned().collect();
++            let mut rmetas = rmetas;
++            for early in early {
++                let full = full_metadata_path(&early);
++                if rmetas.contains(&full) {
++                    let chosen = self.choose_metadata(&full, &early);
++                    rmetas.shift_remove(if chosen == full { &early } else { &full });
++                }
++            }
++            rmetas
++        } else {
++            rmetas
++        };
+         // Order here matters, rmeta should come first.
+         //
+         // Make sure there's at most one rlib and at most one dylib.
+@@ -547,6 +578,28 @@ fn extract_lib(
+         Ok(slot.map(|(svh, metadata, _, _)| (svh, Library { source, metadata })))
+     }
+ 
++    /// Of a crate's full and early metadata, the one to load: whichever
++    /// exists; if both do and describe the same crate (the same crate hash),
++    /// the full one; otherwise the newer, since the other is left over from
++    /// an earlier compilation. (Full metadata reused by incremental
++    /// compilation can be older than this compilation's early metadata, so
++    /// age alone doesn't decide.)
++    fn choose_metadata(&self, full: &Path, early: &Path) -> PathBuf {
++        if !early.exists() {
++            return full.to_path_buf();
++        }
++        if !full.exists() {
++            return early.to_path_buf();
++        }
++        let hash =
++            |path: &Path| metadata_hash(self.target, path, self.metadata_loader, self.cfg_version);
++        if hash(full).is_some() && hash(full) == hash(early) {
++            return full.to_path_buf();
++        }
++        let modified = |path: &Path| std::fs::metadata(path).and_then(|m| m.modified()).ok();
++        if modified(early) > modified(full) { early.to_path_buf() } else { full.to_path_buf() }
++    }
++
+     fn needs_crate_flavor(&self, flavor: CrateFlavor) -> bool {
+         if flavor == CrateFlavor::Dylib && self.is_proc_macro {
+             return true;
+@@ -752,6 +805,19 @@ fn find_commandline_library(
+         let mut dylibs = FxIndexSet::default();
+         let mut sdylib_interfaces = FxIndexSet::default();
+         for loc in &self.exact_paths {
++            // `--extern foo=libfoo.rmeta` also finds `libfoo.early-rmeta`, and
++            // loads whichever is newer.
++            let early_loc;
++            let loc = if self.accept_early_metadata
++                && loc.original().extension().is_some_and(|ext| ext == "rmeta")
++                && self.choose_metadata(loc.original(), &early_metadata_path(loc.original()))
++                    != *loc.original()
++            {
++                early_loc = CanonicalizedPath::new(early_metadata_path(loc.original()));
++                &early_loc
++            } else {
++                loc
++            };
+             let loc_canon = loc.canonicalized();
+             let loc_orig = loc.original();
+             if !loc_canon.exists() {
+@@ -774,7 +840,7 @@ fn find_commandline_library(
+                     rlibs.insert(loc_canon.clone());
+                     continue;
+                 }
+-                if file.ends_with(".rmeta") {
++                if file.ends_with(".rmeta") || is_early_metadata(loc_orig) {
+                     rmetas.insert(loc_canon.clone());
+                     continue;
+                 }
+@@ -814,7 +880,7 @@ pub(crate) fn into_error(
+     }
+ }
+ 
+-fn get_metadata_section<'p>(
++pub(crate) fn get_metadata_section<'p>(
+     target: &Target,
+     flavor: CrateFlavor,
+     filename: &'p Path,
+@@ -973,13 +1039,35 @@ fn get_flavor_from_path(path: &Path) -> CrateFlavor {
+ 
+     if filename.ends_with(".rlib") {
+         CrateFlavor::Rlib
+-    } else if filename.ends_with(".rmeta") {
++    } else if filename.ends_with(".rmeta") || is_early_metadata(path) {
+         CrateFlavor::Rmeta
+     } else {
+         CrateFlavor::Dylib
+     }
+ }
+ 
++/// Whether `path` is early metadata (`-Zearly-metadata`).
++pub(crate) fn is_early_metadata(path: &Path) -> bool {
++    path.extension().is_some_and(|ext| ext == EARLY_METADATA_EXTENSION)
++}
++
++/// The full metadata of the crate whose early metadata is at `early`.
++pub(crate) fn full_metadata_path(early: &Path) -> PathBuf {
++    early.with_extension("rmeta")
++}
++
++/// The crate hash in the metadata file at `path`, if it's readable.
++pub(crate) fn metadata_hash(
++    target: &Target,
++    path: &Path,
++    metadata_loader: &dyn MetadataLoader,
++    cfg_version: &'static str,
++) -> Option<Svh> {
++    get_metadata_section(target, CrateFlavor::Rmeta, path, metadata_loader, cfg_version, None)
++        .ok()
++        .map(|blob| blob.get_crate_hash())
++}
++
+ /// A function to fetch all macros inside a proc-macro crate.
+ ///
+ /// Used by rust-analyzer-proc-macro-srv.
+diff --git a/compiler/rustc_metadata/src/rmeta/decoder.rs b/compiler/rustc_metadata/src/rmeta/decoder.rs
+index 27b36c23d..1766fd77a 100644
+--- a/compiler/rustc_metadata/src/rmeta/decoder.rs
++++ b/compiler/rustc_metadata/src/rmeta/decoder.rs
+@@ -149,6 +149,12 @@ pub(crate) struct CrateMetadata {
+     /// Information about the `extern crate` item or path that caused this crate to be loaded.
+     /// If this is `None`, then the crate was injected (e.g., by the allocator).
+     extern_crate: Option<ExternCrate>,
++
++    /// `-Zearly-metadata`: if this crate was loaded from early metadata, its
++    /// full metadata once loaded (see `CStore::load_full_metadata`), which the
++    /// crate store hands out in place of this from then on. This stays alive,
++    /// so anything decoded from it stays valid.
++    full: OnceLock<Box<CrateMetadata>>,
+ }
+ 
+ /// Holds information about a rustc_span::SourceFile imported from another crate.
+@@ -1995,6 +2001,7 @@ pub(crate) fn new(
+             extern_crate: None,
+             hygiene_context: Default::default(),
+             def_key_cache: Default::default(),
++            full: OnceLock::new(),
+         };
+ 
+         cdata.incoherent_impls = cdata
+@@ -2009,6 +2016,48 @@ pub(crate) fn new(
+         cdata
+     }
+ 
++    /// Whether this crate was loaded from early metadata (`-Zearly-metadata`).
++    pub(crate) fn is_early(&self) -> bool {
++        self.source.rmeta.as_deref().is_some_and(crate::locator::is_early_metadata)
++    }
++
++    /// The full metadata that replaced this early metadata, if loaded.
++    pub(crate) fn full(&self) -> Option<&CrateMetadata> {
++        self.full.get().map(|full| &**full)
++    }
++
++    /// Replaces this early metadata with `blob`, the same crate's full
++    /// metadata at `path`, keeping what this session decided while loading it.
++    pub(crate) fn set_full(&self, tcx: TyCtxt<'_>, blob: MetadataBlob, path: PathBuf) {
++        let root = blob.get_root();
++        let unhashed = blob.get_root_unhashed();
++        let source = CrateSource { rmeta: Some(path), ..(*self.source).clone() };
++        let mut full = CrateMetadata::new(
++            tcx,
++            blob,
++            root,
++            unhashed,
++            self.raw_proc_macros,
++            self.cnum,
++            self.cnum_map.clone(),
++            self.dep_kind,
++            source,
++            self.private_dep,
++            self.host_hash,
++        );
++        full.used = self.used;
++        full.extern_crate = self.extern_crate.clone();
++        // Source files are imported again from the full metadata's table: an
++        // imported file records its index in the table it came from. Spans
++        // decoded before this keep pointing at the early imports, which stay.
++        // Types decoded through a shorthand are cached by their position in
++        // the blob, which means something else in the full metadata.
++        // (Removing entries doesn't depend on the map's iteration order.)
++        #[allow(rustc::potential_query_instability)]
++        tcx.caches.ty_rcache.borrow_mut().retain(|key, _| key.cnum != Some(self.cnum));
++        assert!(self.full.set(Box::new(full)).is_ok(), "full metadata loaded twice");
++    }
++
+     pub(crate) fn dependencies(&self) -> impl Iterator<Item = CrateNum> {
+         self.cnum_map.iter().copied()
+     }
 diff --git a/compiler/rustc_metadata/src/rmeta/encoder.rs b/compiler/rustc_metadata/src/rmeta/encoder.rs
-index afa5646be..340b78acc 100644
+index afa5646be..9bb4ca8e2 100644
 --- a/compiler/rustc_metadata/src/rmeta/encoder.rs
 +++ b/compiler/rustc_metadata/src/rmeta/encoder.rs
-@@ -6,11 +6,12 @@
- use std::ops::Deref;
- use std::path::{Path, PathBuf};
- use std::rc::Rc;
-+use std::sync::atomic::Ordering;
- use std::sync::{Arc, Mutex};
+@@ -10,7 +10,7 @@
  
  use rustc_attr_ir::{AttributeKind, EncodeCrossCrate, find_attr};
  use rustc_data_structures::fingerprint::Fingerprint;
@@ -135,12 +624,15 @@ index afa5646be..340b78acc 100644
  use rustc_data_structures::memmap::{Mmap, MmapMut};
  use rustc_data_structures::owned_slice::slice_owned;
  use rustc_data_structures::stable_hash::{StableHash, StableHasher};
-@@ -78,6 +79,13 @@ pub(super) struct EncodeContext<'a, 'tcx> {
+@@ -78,6 +78,16 @@ pub(super) struct EncodeContext<'a, 'tcx> {
      hygiene_ctxt: Rc<RefCell<HygieneEncodeContext>>,
      // Used for both `Symbol`s and `ByteSymbol`s.
      symbol_index_table: FxHashMap<u32, usize>,
 +
-+    // `-Zearly-metadata`: the bodies the crate's interface needs (see
++    /// Whether this is early metadata (`-Zearly-metadata`), encoded after the
++    /// crate's item interfaces are checked and before its bodies are.
++    early: bool,
++    // Early metadata: the bodies the crate's interface needs (see
 +    // `interface_bodies`), and the MIR and definitions nested in other
 +    // bodies, which are left out.
 +    interface_bodies: Option<FxHashSet<LocalDefId>>,
@@ -149,15 +641,50 @@ index afa5646be..340b78acc 100644
  }
  
  /// If the current crate is a proc-macro, returns early with `LazyArray::default()`.
-@@ -747,7 +755,14 @@ macro_rules! stat {
+@@ -522,7 +532,11 @@ fn encode_symbol_or_byte_symbol(
+     }
+ 
+     fn encode_def_path_table(&mut self) {
+-        let defs = self.tcx.definitions();
++        let defs = if self.early {
++            self.tcx.definitions_after_interfaces()
++        } else {
++            self.tcx.definitions()
++        };
+         if self.is_proc_macro {
+             for def_id in std::iter::once(CRATE_DEF_ID)
+                 .chain(self.tcx.resolutions(()).proc_macros.iter().copied())
+@@ -711,13 +725,20 @@ macro_rules! stat {
+             stat!("exportable-items", || self.encode_stable_order_of_exportable_impls());
+ 
+         // Encode exported symbols info. This is prefetched in `encode_metadata`.
+-        let (exported_non_generic_symbols, exported_generic_symbols) =
++        // Early metadata leaves them out: computing them collects the crate's
++        // monomorphizations, which needs its bodies and its dependencies' full
++        // metadata, and only code generation and linking read them, from full
++        // metadata.
++        let (exported_non_generic_symbols, exported_generic_symbols) = if self.early {
++            (LazyArray::default(), LazyArray::default())
++        } else {
+             stat!("exported-symbols", || {
+                 (
+                     self.encode_exported_symbols(tcx.exported_non_generic_symbols(LOCAL_CRATE)),
+                     self.encode_exported_symbols(tcx.exported_generic_symbols(LOCAL_CRATE)),
+                 )
+-            });
++            })
++        };
+ 
+         // Encode the hygiene data.
+         // IMPORTANT: this *must* be the last thing that we encode (other than `SourceMap`). The
+@@ -747,7 +768,13 @@ macro_rules! stat {
                  },
  
                  stable_crate_id: tcx.stable_crate_id(LOCAL_CRATE),
 -                required_panic_strategy: tcx.required_panic_strategy(LOCAL_CRATE),
 +                // Computing this scans every body's MIR. Only linking reads it,
 +                // and `-Zearly-metadata` is for builds that don't link.
-+                required_panic_strategy: if tcx.sess.encoding_early_metadata.load(Ordering::Relaxed)
-+                {
++                required_panic_strategy: if self.early {
 +                    None
 +                } else {
 +                    tcx.required_panic_strategy(LOCAL_CRATE)
@@ -165,10 +692,37 @@ index afa5646be..340b78acc 100644
                  panic_in_drop_strategy: tcx.sess.opts.unstable_opts.panic_in_drop,
                  edition: tcx.sess.edition(),
                  has_global_allocator: tcx.has_global_allocator(LOCAL_CRATE),
-@@ -1457,247 +1472,255 @@ fn encode_def_ids(&mut self) {
+@@ -800,7 +827,11 @@ macro_rules! stat {
+         // By default the crate hash (SVH) is derived from the encoded metadata bytes. With
+         // `-Z metadata-crate-hash=no` we instead store the legacy HIR-based hash, which the
+         // `crate_hash` query computes directly without consulting `local_crate_hash`.
+-        let hash = if tcx.sess.opts.unstable_opts.metadata_crate_hash {
++        // Early and full metadata must identify the crate the same way, so
++        // with `-Zearly-metadata` the hash comes from the HIR, not the bytes.
++        let hash = if tcx.sess.opts.unstable_opts.metadata_crate_hash
++            && !tcx.sess.opts.unstable_opts.early_metadata
++        {
+             self.opaque.flush();
+             Svh::new(Fingerprint::from_le_bytes(
+                 self.metadata_hasher.lock().unwrap().finish_128().to_le_bytes(),
+@@ -808,7 +839,11 @@ macro_rules! stat {
+         } else {
+             tcx.crate_hash(LOCAL_CRATE)
+         };
+-        tcx.untracked().local_crate_hash.set(hash).expect("local_crate_hash set twice");
++        match tcx.untracked().local_crate_hash.get() {
++            // Early metadata was encoded first.
++            Some(&early) => assert_eq!(early, hash, "early and full metadata disagree on the SVH"),
++            None => tcx.untracked().local_crate_hash.set(hash).unwrap(),
++        }
+ 
+         let unhashed = stat!("final", || {
+             // Indexed by dependency `CrateNum`, matching the numbering `encode_crate_deps` uses.
+@@ -1456,248 +1491,261 @@ fn encode_def_ids(&mut self) {
+ 
          let tcx = self.tcx;
  
-         for local_id in tcx.iter_local_def_id() {
+-        for local_id in tcx.iter_local_def_id() {
 -            let def_id = local_id.to_def_id();
 -            let def_kind = tcx.def_kind(local_id);
 -            self.tables.def_kind.set_some(def_id.index, def_kind);
@@ -185,6 +739,12 @@ index afa5646be..340b78acc 100644
 -                        | hir::Node::Infer(hir::InferArg { kind: hir::InferArgKind::Const, .. })
 -                )
 -            {
++        let local_ids: Vec<LocalDefId> = if self.early {
++            tcx.iter_local_def_id_after_interfaces().collect()
++        } else {
++            tcx.iter_local_def_id().collect()
++        };
++        for local_id in local_ids {
 +            if let Some(body) = self.early_enclosing_body(local_id) {
 +                self.tables.def_kind.set_some(local_id.local_def_index, tcx.def_kind(local_id));
 +                self.deferred_defs.push((local_id, body));
@@ -642,7 +1202,7 @@ index afa5646be..340b78acc 100644
          }
      }
  
-@@ -1859,71 +1882,223 @@ fn encode_precise_capturing_args(&mut self, def_id: DefId) {
+@@ -1859,72 +1907,220 @@ fn encode_precise_capturing_args(&mut self, def_id: DefId) {
          record_array!(self.tables.rendered_precise_capturing_args[def_id] <- precise_capturing_args);
      }
  
@@ -732,7 +1292,7 @@ index afa5646be..340b78acc 100644
 +    /// regardless: dependents read their witnesses to check `Send`.
 +    fn early_enclosing_body(&self, def_id: LocalDefId) -> Option<LocalDefId> {
 +        let tcx = self.tcx;
-+        if !tcx.sess.encoding_early_metadata.load(Ordering::Relaxed) {
++        if !self.early {
 +            return None;
 +        }
 +        match tcx.def_kind(def_id) {
@@ -865,8 +1425,8 @@ index afa5646be..340b78acc 100644
 +                self.encode_mir_for(def_id, c, o);
 +            } else if verify {
 +                self.report_missed_body(def_id, body);
-+            }
-+        }
+             }
+         }
 +        for (def_id, body) in std::mem::take(&mut self.deferred_defs) {
 +            if self.interface_bodies().contains(&body) {
 +                self.encode_def_id(def_id);
@@ -897,11 +1457,7 @@ index afa5646be..340b78acc 100644
 +        // code, and computing it walks the bodies of inline and generic
 +        // functions. With `-Zearly-metadata` (never codegen), skip it.
 +        let unreachable = LocalDefIdSet::default();
-+        let reachable_set = if tcx.sess.encoding_early_metadata.load(Ordering::Relaxed) {
-+            &unreachable
-+        } else {
-+            tcx.reachable_set(())
-+        };
++        let reachable_set = if self.early { &unreachable } else { tcx.reachable_set(()) };
 +
 +        let keys_and_jobs = tcx.mir_keys(()).iter().filter_map(|&def_id| {
 +            let (encode_const, encode_opt) = should_encode_mir(tcx, reachable_set, def_id);
@@ -911,66 +1467,201 @@ index afa5646be..340b78acc 100644
 +            if let Some(body) = self.early_enclosing_body(def_id) {
 +                self.deferred_mir.push((def_id, body, encode_const, encode_opt));
 +                continue;
-             }
++            }
 +            self.encode_mir_for(def_id, encode_const, encode_opt);
-         }
++        }
  
          // Encode all the deduced parameter attributes for everything that has MIR, even for items
-@@ -2691,6 +2866,9 @@ fn with_encode_metadata_header(
+         // that can't be inlined. But don't if we aren't optimizing in non-incremental mode, to
+@@ -2543,13 +2739,17 @@ pub fn encode_metadata(tcx: TyCtxt<'_>, path: &Path, ref_path: Option<&Path>) {
+         let owned = slice_owned(mmap, Deref::deref);
+         let blob = MetadataBlob::new(owned);
+         let hash = blob.expect("file already created").get_crate_hash();
+-        tcx.untracked().local_crate_hash.set(hash).expect("local_crate_hash set twice");
++        match tcx.untracked().local_crate_hash.get() {
++            // Early metadata was encoded first.
++            Some(&early) => assert_eq!(early, hash, "early and full metadata disagree on the SVH"),
++            None => tcx.untracked().local_crate_hash.set(hash).unwrap(),
++        }
+ 
+         // Generate the metadata stub manually, as that is a small file compared to full metadata.
+         if let Some(ref_path) = ref_path {
+             let _prof_timer = tcx.prof.verbose_generic_activity("generate_crate_metadata_stub");
+ 
+-            with_encode_metadata_header(tcx, ref_path, |ecx| {
++            with_encode_metadata_header(tcx, ref_path, false, |ecx| {
+                 let header: LazyValue<CrateHeader> = ecx.lazy(CrateHeader {
+                     name: tcx.crate_name(LOCAL_CRATE),
+                     triple: tcx.sess.opts.target_triple.clone(),
+@@ -2582,7 +2782,7 @@ pub fn encode_metadata(tcx: TyCtxt<'_>, path: &Path, ref_path: Option<&Path>) {
+         dep_node,
+         tcx,
+         || {
+-            with_encode_metadata_header(tcx, path, |ecx| {
++            with_encode_metadata_header(tcx, path, false, |ecx| {
+                 // Encode all the entries and extra information in the crate,
+                 // culminating in the `CrateRoot` which points to all of it.
+                 let (root, unhashed) = ecx.encode_crate_root();
+@@ -2606,7 +2806,7 @@ pub fn encode_metadata(tcx: TyCtxt<'_>, path: &Path, ref_path: Option<&Path>) {
+     if let Some(ref_path) = ref_path {
+         let _prof_timer = tcx.prof.verbose_generic_activity("generate_crate_metadata_stub");
+ 
+-        with_encode_metadata_header(tcx, ref_path, |ecx| {
++        with_encode_metadata_header(tcx, ref_path, false, |ecx| {
+             let header: LazyValue<CrateHeader> = ecx.lazy(CrateHeader {
+                 name: tcx.crate_name(LOCAL_CRATE),
+                 triple: tcx.sess.opts.target_triple.clone(),
+@@ -2618,9 +2818,24 @@ pub fn encode_metadata(tcx: TyCtxt<'_>, path: &Path, ref_path: Option<&Path>) {
+     }
+ }
+ 
++/// Encodes early metadata (`-Zearly-metadata`) to `path`: the crate's item
++/// interfaces, written after `analysis_interfaces` and before function bodies
++/// are checked, so dependents can start compiling. It isn't tracked for
++/// incremental reuse; it's cheap and always re-encoded.
++pub fn encode_early_metadata(tcx: TyCtxt<'_>, path: &Path) {
++    tcx.dep_graph.assert_ignored();
++    let _prof_timer = tcx.prof.verbose_generic_activity("generate_crate_metadata_early");
++    with_encode_metadata_header(tcx, path, true, |ecx| {
++        let (root, unhashed) = ecx.encode_crate_root();
++        ecx.opaque.flush();
++        (root.position.get(), unhashed.position.get())
++    })
++}
++
+ fn with_encode_metadata_header(
+     tcx: TyCtxt<'_>,
+     path: &Path,
++    early: bool,
+     f: impl FnOnce(&mut EncodeContext<'_, '_>) -> (usize, usize),
+ ) {
+     // By default the crate hash (SVH) is computed from the bytes of the encoded metadata,
+@@ -2691,6 +2906,10 @@ fn with_encode_metadata_header(
          is_proc_macro: tcx.crate_types().contains(&CrateType::ProcMacro),
          hygiene_ctxt: Default::default(),
          symbol_index_table: Default::default(),
++        early,
 +        interface_bodies: None,
 +        deferred_mir: Default::default(),
 +        deferred_defs: Default::default(),
      };
  
      // Encode the rustc version string in a predictable location.
+diff --git a/compiler/rustc_metadata/src/rmeta/mod.rs b/compiler/rustc_metadata/src/rmeta/mod.rs
+index e3f3257ac..afa845eac 100644
+--- a/compiler/rustc_metadata/src/rmeta/mod.rs
++++ b/compiler/rustc_metadata/src/rmeta/mod.rs
+@@ -6,7 +6,7 @@
+ pub(crate) use decoder::{CrateMetadata, CrateNumMap, MetadataBlob, TargetModifiers};
+ use def_path_hash_map::DefPathHashMapRef;
+ use encoder::EncodeContext;
+-pub use encoder::{EncodedMetadata, encode_metadata, rendered_const};
++pub use encoder::{EncodedMetadata, encode_early_metadata, encode_metadata, rendered_const};
+ pub(crate) use parameterized::ParameterizedOverTcx;
+ use rustc_abi::{FieldIdx, ReprOptions, VariantIdx};
+ use rustc_ast as ast;
+diff --git a/compiler/rustc_middle/src/hir/map.rs b/compiler/rustc_middle/src/hir/map.rs
+index ea266e003..485cc01dd 100644
+--- a/compiler/rustc_middle/src/hir/map.rs
++++ b/compiler/rustc_middle/src/hir/map.rs
+@@ -1166,7 +1166,11 @@ fn hir_foreign_item(&self, id: ForeignItemId) -> &'tcx ForeignItem<'tcx> {
+ pub(super) fn crate_hash(tcx: TyCtxt<'_>, _: LocalCrate) -> Svh {
+     // `-Z metadata-crate-hash=no` opts back into computing the SVH from the HIR rather than
+     // from the encoded crate metadata. This is a safety fallback for the metadata-based hashing.
+-    if !tcx.sess.opts.unstable_opts.metadata_crate_hash {
++    // `-Z early-metadata` writes metadata twice, early and full, and both must
++    // carry the same SVH, so it can't depend on the encoded bytes either.
++    if !tcx.sess.opts.unstable_opts.metadata_crate_hash
++        || (tcx.sess.opts.unstable_opts.early_metadata && tcx.needs_metadata())
++    {
+         return legacy_crate_hash(tcx);
+     }
+ 
+diff --git a/compiler/rustc_middle/src/queries.rs b/compiler/rustc_middle/src/queries.rs
+index ddaf12f98..9b0e3ac58 100644
+--- a/compiler/rustc_middle/src/queries.rs
++++ b/compiler/rustc_middle/src/queries.rs
+@@ -403,6 +403,17 @@ fn describe_as_module(def_id: impl Into<LocalDefId>, tcx: TyCtxt<'_>) -> String
+         }
+     }
+ 
++    /// The analysis passes that check the crate's item interfaces, before any
++    /// function body is type-checked. `analysis` runs these first; with
++    /// `-Zearly-metadata`, the driver writes early metadata after them.
++    query analysis_interfaces(key: ()) {
++        eval_always
++        desc {
++            "checking item interfaces of crate `{}`",
++            tcx.crate_name(LOCAL_CRATE),
++        }
++    }
++
+     /// The root query triggering all analysis passes like typeck or borrowck.
+     query analysis(key: ()) {
+         eval_always
 diff --git a/compiler/rustc_middle/src/ty/context.rs b/compiler/rustc_middle/src/ty/context.rs
-index 5cd7322ce..13aba4ba6 100644
+index 5cd7322ce..7b3ecf622 100644
 --- a/compiler/rustc_middle/src/ty/context.rs
 +++ b/compiler/rustc_middle/src/ty/context.rs
-@@ -1371,7 +1371,7 @@ pub fn create_crate_num(
- 
+@@ -1166,7 +1166,8 @@ pub fn needs_hir_hash(self) -> bool {
+     /// built from the encoded metadata plus each owner's cheaper `OwnerInfo::fingerprint` (just the
+     /// node and attr sub-hashes), so the combined hash is never read and computing it is wasted
+     /// work. It is still required for:
+-    /// - `-Z metadata-crate-hash=no`, where `crate_hash` falls back to hashing each `OwnerInfo`;
++    /// - `-Z metadata-crate-hash=no` and `-Z early-metadata`, where `crate_hash` falls back to
++    ///   hashing each `OwnerInfo`;
+     /// - incremental, where the `lower_to_hir` result is fingerprinted for red/green tracking;
+     /// - debug assertions, where every query result is fingerprinted to catch nondeterminism.
+     ///
+@@ -1174,6 +1175,7 @@ pub fn needs_hir_hash(self) -> bool {
+     pub fn needs_owner_info_hash(self) -> bool {
+         self.needs_hir_hash()
+             && (!self.sess.opts.unstable_opts.metadata_crate_hash
++                || (self.sess.opts.unstable_opts.early_metadata && self.needs_metadata())
+                 || self.sess.opts.incremental.is_some()
+                 || cfg!(debug_assertions))
+     }
+@@ -1372,7 +1374,19 @@ pub fn create_crate_num(
      pub fn iter_local_def_id(self) -> impl Iterator<Item = LocalDefId> {
          // Depend on the `analysis` query to ensure compilation if finished.
--        self.ensure_ok().analysis(());
-+        self.ensure_analysis_unless_early_metadata();
+         self.ensure_ok().analysis(());
++        self.iter_local_def_id_unchecked()
++    }
++
++    /// Like [`Self::iter_local_def_id`], but only requires the crate's item
++    /// interfaces to be checked (`analysis_interfaces`). For `-Zearly-metadata`,
++    /// which encodes metadata before function bodies are checked. The caller
++    /// must first create any definitions that checking bodies would add.
++    pub fn iter_local_def_id_after_interfaces(self) -> impl Iterator<Item = LocalDefId> {
++        self.ensure_ok().analysis_interfaces(());
++        self.iter_local_def_id_unchecked()
++    }
  
++    fn iter_local_def_id_unchecked(self) -> impl Iterator<Item = LocalDefId> {
          let definitions = &self.untracked.definitions;
          gen {
-@@ -1390,9 +1390,30 @@ pub fn iter_local_def_id(self) -> impl Iterator<Item = LocalDefId> {
+             let mut i = 0;
+@@ -1390,6 +1404,20 @@ pub fn iter_local_def_id(self) -> impl Iterator<Item = LocalDefId> {
          }
      }
  
 +    /// Whether `typeck(def_id)` has already been computed in this session,
-+    /// without computing it. For `-Zearly-metadata`, which encodes a body's
-+    /// contents only if something already needed the body type-checked.
++    /// without computing it. Only for `-Zearly-metadata-verify`'s report.
 +    pub fn typeck_is_done(self, def_id: LocalDefId) -> bool {
 +        let root = self.typeck_root_def_id_local(def_id);
 +        self.query_system.query_vtables.typeck_root.cache.lookup(&root).is_some()
 +    }
 +
-+    /// Runs `analysis`, except while `-Zearly-metadata` is encoding metadata
-+    /// from inside it: then every definition the metadata needs already
-+    /// exists (the encoder freezes the table), and waiting would be a cycle.
-+    /// Instead, depend on the crate's items, so that incremental compilation
-+    /// re-encodes metadata when definitions are added or removed.
-+    fn ensure_analysis_unless_early_metadata(self) {
-+        if self.sess.encoding_early_metadata.load(std::sync::atomic::Ordering::Relaxed) {
-+            self.ensure_ok().hir_crate_items(());
-+        } else {
-+            self.ensure_ok().analysis(());
-+        }
++    /// Like [`Self::definitions`], but only requires the crate's item
++    /// interfaces to be checked; see [`Self::iter_local_def_id_after_interfaces`].
++    pub fn definitions_after_interfaces(self) -> &'tcx rustc_hir::definitions::Definitions {
++        self.ensure_ok().analysis_interfaces(());
++        self.untracked.definitions.freeze()
 +    }
 +
      pub fn definitions(self) -> &'tcx rustc_hir::definitions::Definitions {
          // Depend on the `analysis` query to ensure compilation if finished.
--        self.ensure_ok().analysis(());
-+        self.ensure_analysis_unless_early_metadata();
- 
-         // Freeze definitions once we start iterating on them, to prevent adding new ones
-         // while iterating. If some query needs to add definitions, it should be `ensure`d above.
+         self.ensure_ok().analysis(());
 diff --git a/compiler/rustc_session/src/options.rs b/compiler/rustc_session/src/options.rs
 index 0e0671301..336b6168c 100644
 --- a/compiler/rustc_session/src/options.rs
@@ -988,27 +1679,3 @@ index 0e0671301..336b6168c 100644
      ehcont_guard: bool = (false, parse_bool, [TRACKED],
          "generate Windows EHCont Guard tables"),
      embed_metadata: bool = (true, parse_bool, [TRACKED],
-diff --git a/compiler/rustc_session/src/session.rs b/compiler/rustc_session/src/session.rs
-index 060e614e8..3a8035eb0 100644
---- a/compiler/rustc_session/src/session.rs
-+++ b/compiler/rustc_session/src/session.rs
-@@ -549,6 +549,11 @@ pub struct Session {
-     /// while generating the synthetic test entry point.
-     pub removed_rustc_main_attr: AtomicBool,
- 
-+    /// Set while `-Zearly-metadata` encodes metadata from inside the
-+    /// `analysis` query, so that reading the definitions table doesn't
-+    /// require `analysis` to have finished.
-+    pub encoding_early_metadata: AtomicBool,
-+
-     /// Config specifying targets' pointer authentication preference.
-     pub pointer_auth_config: Option<PointerAuthConfig>,
- 
-@@ -1515,6 +1520,7 @@ pub fn build_session(
-         thin_lto_supported,
-         mir_opt_bisect_eval_count: AtomicUsize::new(0),
-         removed_rustc_main_attr: AtomicBool::new(false),
-+        encoding_early_metadata: AtomicBool::new(false),
-         pointer_auth_config,
-         sanitizers,
-     };

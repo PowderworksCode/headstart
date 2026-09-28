@@ -1,12 +1,128 @@
 # Results
 
-All numbers are clean `cargo check` builds of rustc-perf benchmarks
-(`rustc/src/tools/rustc-perf/collector/compile-benchmarks`), taken with
-`scripts/bench.sh`. Each run alternates headstart off and on, using the
-same patched rustc and cargo. With headstart off, both behave like
-upstream. The tables give medians.
+The rustc-perf benchmarks are in
+`rustc/src/tools/rustc-perf/collector/compile-benchmarks`. All numbers
+come from clean builds of them, taken with `scripts/bench.sh`. Each run
+alternates headstart off and on, using the same patched rustc and cargo.
+With headstart off, both behave like upstream. Tables give medians.
 
-## Correctness
+The first sections cover the current version: early metadata as a
+separate file, used by both `cargo check` and `cargo build`. The later
+sections are measurements of the first, check-only version. They're kept
+for the error-delay, memory, parallel front end and incremental numbers,
+which the current version doesn't change for `cargo check`.
+
+## Correctness (current version)
+
+- **Benchmark sweeps.** All 53 multi-file benchmarks were built with
+  headstart off and on, on Linux with 16 jobs, once with `cargo build`
+  and once with `cargo check`. In both, 52 pass in both modes with
+  identical diagnostics. stm32f4 fails in both modes because it needs a
+  device feature; its build-script panic messages differ only in the
+  thread ID.
+- **Test suites.**
+  - rustc's UI suite passes with the patch applied: 22129 passed,
+    0 failed, on Linux.
+  - cargo's test suite passes: 4034 passed. The single failure,
+    `aaa_trigger_cross_compile_disabled_check`, only flags that there's no
+    cross-compilation target installed.
+- **Errors.** `scripts/check-errors.sh` runs three scenarios on
+  `tests/errors`: a clean build, an error in a dependency's body, and an
+  error in the binary. It runs each with `cargo check` and `cargo build`,
+  in human and JSON formats, with headstart off and on. Diagnostics and
+  exit status are identical, and so is what the built binary prints.
+  Three things can differ:
+  - progress lines (`Checking`, `Compiling`, "waiting for other jobs");
+  - the order of JSON messages across crates, which cargo doesn't
+    guarantee, and headstart holds a crate's messages until its
+    dependencies finish;
+  - lock-wait messages.
+- **Incremental.** `scripts/check-incremental.sh check` and
+  `scripts/check-incremental.sh build` run ten edit steps each. Every step
+  matches headstart-off, and the final state matches a clean build.
+
+The sweeps found two bugs in the swap to full metadata, both fixed:
+
+- **A stale type cache.** rustc caches decoded types by their position
+  in a crate's metadata. After the swap, positions in the full file
+  collided with cached ones from the early file. This crashed
+  cargo-0.87.1 and large-workspace.
+- **Stale-looking full metadata.** Incremental compilation reused a full
+  `.rmeta` by hard-linking it, which kept its old modification time, so
+  it looked older than this compilation's early metadata. Rustc now
+  decides between the two files by crate hash, not by age.
+
+## Timing: `cargo build` (debug), Linux, AMD EPYC 9554P, 16 jobs, 5 runs
+
+The runs started once the VM was idle (load average 0.8). In 20 of 21
+benchmarks, every run with headstart was faster than every run without
+it; the exception is encoding, the smallest.
+
+| project | today | headstart | saved |
+|---|--:|--:|--:|
+| piston-image | 8.40 s | 5.72 s | 32% |
+| unicode-normalization-0.1.24 | 2.12 s | 1.61 s | 24% |
+| ripgrep-14.1.1 | 15.00 s | 11.60 s | 23% |
+| nalgebra-0.33.0 | 24.16 s | 19.00 s | 21% |
+| eza-0.21.2 | 32.49 s | 26.17 s | 19% |
+| wg-grammar | 10.78 s | 8.69 s | 19% |
+| hyper-1.6.0 | 2.84 s | 2.32 s | 18% |
+| image-0.25.6 | 26.14 s | 21.56 s | 18% |
+| regex-automata-0.4.8 | 9.41 s | 7.72 s | 18% |
+| syn-2.0.101 | 5.20 s | 4.42 s | 15% |
+| html5ever-0.31.0 | 8.23 s | 7.15 s | 13% |
+| html5ever | 17.23 s | 15.22 s | 12% |
+| cargo-0.87.1 | 93.07 s | 82.76 s | 11% |
+| tt-muncher | 2.42 s | 2.18 s | 10% |
+| serde_derive-1.0.219 | 8.38 s | 7.61 s | 9% |
+| clap_derive-4.5.32 | 8.44 s | 7.73 s | 8% |
+| cranelift-codegen-0.119.0 | 29.01 s | 26.99 s | 7% |
+| diesel-2.2.10 | 40.71 s | 37.90 s | 7% |
+| cargo (old) | 30.10 s | 28.32 s | 6% |
+| encoding | 1.50 s | 1.41 s | 6% |
+| projection-caching | 11.86 s | 11.11 s | 6% |
+
+Each dependent's analysis overlaps its dependencies' body checking. It
+then waits for full metadata only before code generation, and by then
+its analysis is usually done.
+
+## Timing: `cargo check`, current version
+
+Same benchmarks and machine, again 5 runs per benchmark, starting from an
+idle VM (load average 0.6). In 21 of 21 benchmarks, every run with
+headstart was faster than every run without it.
+
+| project | today | headstart | saved |
+|---|--:|--:|--:|
+| ripgrep-14.1.1 | 10.37 s | 5.49 s | 47% |
+| piston-image | 6.33 s | 4.02 s | 36% |
+| serde_derive-1.0.219 | 5.81 s | 3.75 s | 35% |
+| clap_derive-4.5.32 | 6.08 s | 4.22 s | 31% |
+| unicode-normalization-0.1.24 | 2.00 s | 1.37 s | 31% |
+| eza-0.21.2 | 27.78 s | 19.56 s | 30% |
+| tt-muncher | 1.87 s | 1.35 s | 28% |
+| image-0.25.6 | 19.25 s | 14.84 s | 23% |
+| cargo-0.87.1 | 52.45 s | 41.07 s | 22% |
+| hyper-1.6.0 | 2.47 s | 1.92 s | 22% |
+| regex-automata-0.4.8 | 6.96 s | 5.51 s | 21% |
+| nalgebra-0.33.0 | 22.80 s | 18.25 s | 20% |
+| cargo (old) | 21.35 s | 17.43 s | 18% |
+| wg-grammar | 10.21 s | 8.65 s | 15% |
+| syn-2.0.101 | 3.60 s | 3.09 s | 14% |
+| html5ever | 16.92 s | 14.71 s | 13% |
+| html5ever-0.31.0 | 7.79 s | 6.91 s | 11% |
+| projection-caching | 11.19 s | 10.19 s | 9% |
+| cranelift-codegen-0.119.0 | 20.36 s | 18.75 s | 8% |
+| encoding | 1.16 s | 1.07 s | 8% |
+| diesel-2.2.10 | 39.22 s | 36.33 s | 7% |
+
+Compared with the first, check-only version, nothing is slower any more.
+The html5ever benchmarks were flat before (−1% to −2%) and gain 11–13%
+now.
+
+## Earlier measurements (first, check-only version)
+
+### Correctness
 
 **macOS (M2 Max).** A sweep over all 53 multi-file benchmarks (the
 rustc-perf directories with a `Cargo.toml`, minus solver and `-nll`
@@ -48,7 +164,7 @@ after bodies are checked:
 rustc's UI suite passes with the patch applied and the flag off:
 21967 passed, 0 failed, 421 ignored.
 
-## The interface-body set
+### The interface-body set
 
 Every benchmark, built with headstart on and `-Zearly-metadata-verify`,
 checks that no body was type-checked during the early write without
@@ -61,7 +177,7 @@ of the function that contains it. nom's `bits::take` returns
 `impl Fn`, so its body is an interface body, and those constants were
 wrongly left out.
 
-## Incremental builds
+### Incremental builds
 
 `scripts/check-incremental.sh` applies ten steps to `tests/errors`, with
 headstart off and on in separate directories:
@@ -89,7 +205,7 @@ It found two bugs:
    write had dropped that dependency. It now depends on the crate's item
    list.
 
-## Clippy and rustdoc
+### Clippy and rustdoc
 
 Both read check-mode metadata, so both read early metadata with headstart
 on.
@@ -109,7 +225,7 @@ on.
   - Both already depend on scheduling order: changing `-j` with headstart
     *off* reproduces both differences.
 
-## Errors
+### Errors
 
 **Same output.** `scripts/check-errors.sh` builds `tests/errors` in three
 scenarios, with headstart off and on, in both human and JSON formats:
@@ -141,14 +257,14 @@ total to 18.8 s, with a median of 23 ms and a maximum of 1.6 s.
 The error at the start of `slow`, in `tests/errors`, is printed at 0.17 s
 in both modes.
 
-## Cargo's test suite
+### Cargo's test suite
 
 With the patch applied and headstart off, cargo's own test suite passes:
 4027 passed, 1 failed. The failure,
 `aaa_trigger_cross_compile_disabled_check`, only flags that this machine
 has no cross-compilation target installed.
 
-## Timing: Linux, AMD EPYC 9554P, 16 jobs, 5 runs
+### Timing: Linux, AMD EPYC 9554P, 16 jobs, 5 runs
 
 These runs started once the VM was idle (load average 0.57). They use
 the current patches, which include two fixes that made an earlier Linux
@@ -193,7 +309,7 @@ run understate headstart:
   benchmarks pass in both modes with identical diagnostics, and stm32f4
   fails in both.
 
-## Peak memory
+### Peak memory
 
 These runs sample the total resident memory of all rustc processes every
 100 ms during clean `cargo check` builds, on Linux with 16 jobs, median
@@ -216,7 +332,7 @@ of 3:
   patches, match the timing table above: the interface-body rule and the
   incremental fixes didn't change it.
 
-## With the parallel front end (`-Zthreads=8`)
+### With the parallel front end (`-Zthreads=8`)
 
 The parallel front end spreads a crate's type-checking, borrow-checking
 and other analysis over up to 8 threads inside one rustc process. Those
@@ -254,7 +370,7 @@ is a clean `cargo check`, median of 3, with the min–max in brackets:
 The parallel front end is still nightly-only and off by default. Once it
 ships, headstart's value is the last column against the third.
 
-## Incremental edit loop
+### Incremental edit loop
 
 These runs edit one function body in cargo's own workspace, then run an
 incremental `cargo check`, with a warm target directory per mode. Each
@@ -271,7 +387,7 @@ and its dependents recheck. But it applies to every edit. Even an edit to
 the top `cargo` library saves time, because cargo's binaries start on
 the library's early metadata.
 
-## Timing: Apple M2 Max, 12 jobs, 5 runs (first version)
+### Timing: Apple M2 Max, 12 jobs, 5 runs (first version)
 
 | project | today | headstart | saved |
 |---|--:|--:|--:|
@@ -302,7 +418,7 @@ rows without a star were consistent across runs. For instance, every
 regex-automata, unicode-normalization and serde_derive run was faster
 with headstart on.
 
-## Where it doesn't help
+### Where it doesn't help
 
 - **CPU-bound builds.** cargo-0.87.1 has about 211 s of rustc work. On
   the 12-core Mac, the cores are busy almost until the last crate starts,
