@@ -40,7 +40,7 @@ index 4bf69f6..ec435fb 100644
 +    *ON
 +}
 diff --git a/src/compiler/job_queue/job_state.rs b/src/compiler/job_queue/job_state.rs
-index b866821..d0794f3 100644
+index b866821..dbc107c 100644
 --- a/src/compiler/job_queue/job_state.rs
 +++ b/src/compiler/job_queue/job_state.rs
 @@ -50,6 +50,9 @@ pub struct JobState<'a, 'gctx> {
@@ -79,7 +79,26 @@ index b866821..d0794f3 100644
          }
          Ok(())
      }
-@@ -150,6 +154,11 @@ impl<'a, 'gctx> JobState<'a, 'gctx> {
+@@ -147,9 +151,30 @@ impl<'a, 'gctx> JobState<'a, 'gctx> {
+     /// A method used to signal to the coordinator thread that the rmeta file
+     /// for an rlib has been produced. This is only called for some rmeta
+     /// builds when required, and can be called at any time before a job ends.
++    /// Headstart: rustc paused before code generation, waiting for the full
++    /// metadata file `file`.
++    pub fn paused(&self, file: String) {
++        self.messages.push(Message::Paused(self.id, file));
++    }
++
++    /// Headstart: this unit wrote the full metadata file `file`.
++    pub fn metadata_written(&self, file: String) {
++        self.messages.push(Message::MetadataWritten(file));
++    }
++
++    /// Headstart: a paused rustc resumed.
++    pub fn resumed(&self) {
++        self.messages.push(Message::Resumed(self.id));
++    }
++
      /// This should only be called once because a metadata file can only be
      /// produced once!
      pub fn rmeta_produced(&self) {
@@ -92,16 +111,30 @@ index b866821..d0794f3 100644
          self.messages
              .push(Message::Finish(self.id, Artifact::Metadata, Ok(())));
 diff --git a/src/compiler/job_queue/mod.rs b/src/compiler/job_queue/mod.rs
-index a581e11..b9cca0e 100644
+index a581e11..fe9add9 100644
 --- a/src/compiler/job_queue/mod.rs
 +++ b/src/compiler/job_queue/mod.rs
-@@ -210,6 +210,36 @@ struct DrainState<'gctx> {
+@@ -210,6 +210,50 @@ struct DrainState<'gctx> {
      /// How many jobs we've finished
      finished: usize,
      per_package_future_incompat_reports: Vec<FutureIncompatReportPackage>,
 +
 +    /// Headstart: output of units whose dependencies haven't finished yet.
 +    provisional: Provisional,
++
++    /// Headstart: jobs paused before code generation, waiting for a
++    /// dependency's full metadata file (by file name) not written yet. They
++    /// don't count as running, so their job slots go to other work.
++    paused: HashMap<JobId, String>,
++    /// Headstart: paused jobs whose full metadata has been written. Each takes
++    /// a jobserver token to resume. Until it has, no new job starts, so freed
++    /// tokens go to it instead of to work started in its place.
++    ready_to_resume: HashSet<JobId>,
++    /// Headstart: full metadata files written so far, by file name.
++    metadata_written: HashSet<String>,
++    /// Headstart: resumed jobs, which hold the token they resumed with
++    /// themselves. Cargo returns it to the jobserver when they finish.
++    resumed: HashSet<JobId>,
 +}
 +
 +/// With headstart (`CARGO_HEADSTART=1`), a unit starts on a dependency's
@@ -132,7 +165,7 @@ index a581e11..b9cca0e 100644
  }
  
  /// Count of warnings, used to print a summary after the job succeeds
-@@ -357,8 +387,8 @@ enum Artifact {
+@@ -357,8 +401,8 @@ enum Artifact {
  
  enum Message {
      Run(JobId, String),
@@ -143,7 +176,22 @@ index a581e11..b9cca0e 100644
  
      // This is for general stderr output from subprocesses
      Diagnostic {
-@@ -453,7 +483,12 @@ impl<'gctx> JobQueue<'gctx> {
+@@ -389,6 +433,14 @@ enum Message {
+     Finish(JobId, Artifact, CargoResult<()>),
+     FutureIncompatReport(JobId, Vec<FutureBreakageItem>),
+     SectionTiming(JobId, SectionTiming),
++
++    /// Headstart: rustc paused before code generation, waiting for the full
++    /// metadata file named here.
++    Paused(JobId, String),
++    /// Headstart: a paused rustc took a jobserver token and resumed.
++    Resumed(JobId),
++    /// Headstart: some rustc wrote the full metadata file named here.
++    MetadataWritten(String),
+     UnusedExterns(JobId, std::collections::BTreeSet<InternedString>),
+ }
+ 
+@@ -453,7 +505,12 @@ impl<'gctx> JobQueue<'gctx> {
          // the target as well. This should ensure that edges changed to
          // `Metadata` propagate upwards `All` dependencies to anything that
          // transitively contains the `Metadata` edge.
@@ -157,7 +205,7 @@ index a581e11..b9cca0e 100644
              for dep in dependencies {
                  depend_on_deps_of_deps(build_runner, &mut queue_deps, dep.unit.clone());
              }
-@@ -523,6 +558,10 @@ impl<'gctx> JobQueue<'gctx> {
+@@ -523,6 +580,14 @@ impl<'gctx> JobQueue<'gctx> {
              ),
              finished: 0,
              per_package_future_incompat_reports: Vec::new(),
@@ -165,10 +213,56 @@ index a581e11..b9cca0e 100644
 +                enabled: build_runner.headstart_enabled(),
 +                ..Default::default()
 +            },
++            paused: HashMap::default(),
++            ready_to_resume: HashSet::default(),
++            metadata_written: HashSet::default(),
++            resumed: HashSet::default(),
          };
  
          // Create a helper thread for acquiring jobserver tokens
-@@ -616,7 +655,9 @@ impl<'gctx> DrainState<'gctx> {
+@@ -588,7 +653,11 @@ impl<'gctx> DrainState<'gctx> {
+         // The `pending_queue` is sorted in ascending priority order, and we
+         // remove items from its end to schedule the highest priority items
+         // sooner.
+-        while self.has_extra_tokens() && !self.pending_queue.is_empty() {
++        // Headstart: jobs ready to resume get freed tokens before new jobs.
++        while self.ready_to_resume.is_empty()
++            && self.has_extra_tokens()
++            && !self.pending_queue.is_empty()
++        {
+             let (unit, job, _) = self.pending_queue.pop().unwrap();
+             *self.counts.get_mut(&unit.pkg.package_id()).unwrap() -= 1;
+             // Print out some nice progress information.
+@@ -607,8 +676,27 @@ impl<'gctx> DrainState<'gctx> {
+         Ok(())
+     }
+ 
++    /// Running jobs whose job slot is a token Cargo holds: active ones, minus
++    /// paused ones (which gave their slot up) and resumed ones (which hold
++    /// the token they resumed with themselves). Headstart only.
++    fn slot_holders(&self) -> usize {
++        self.active
++            .len()
++            .saturating_sub(self.paused.len() + self.ready_to_resume.len() + self.resumed.len())
++    }
++
++    /// Headstart: forgets a finished job's pause state, and returns the token
++    /// it resumed with, if any, to the jobserver.
++    fn job_ended(&mut self, build_runner: &BuildRunner<'_, '_>, id: JobId) {
++        self.paused.remove(&id);
++        self.ready_to_resume.remove(&id);
++        if self.resumed.remove(&id) {
++            build_runner.jobserver.release_raw().ok();
++        }
++    }
++
+     fn has_extra_tokens(&self) -> bool {
+-        self.active.len() < self.tokens.len() + 1
++        self.slot_holders() < self.tokens.len() + 1
+     }
+ 
+     fn handle_event(
+@@ -616,7 +704,9 @@ impl<'gctx> DrainState<'gctx> {
          build_runner: &mut BuildRunner<'_, '_>,
          event: Message,
      ) -> Result<(), ErrorToHandle> {
@@ -179,7 +273,7 @@ index a581e11..b9cca0e 100644
          match event {
              Message::Run(id, cmd) => {
                  build_runner
-@@ -627,10 +668,10 @@ impl<'gctx> DrainState<'gctx> {
+@@ -627,10 +717,10 @@ impl<'gctx> DrainState<'gctx> {
                  self.timings
                      .unit_start(build_runner, id, self.active[&id].clone());
              }
@@ -192,8 +286,11 @@ index a581e11..b9cca0e 100644
                  let mut shell = build_runner.bcx.gctx.shell();
                  shell.print_ansi_stderr(err.as_bytes())?;
                  shell.err().write_all(b"\n")?;
-@@ -680,32 +721,8 @@ impl<'gctx> DrainState<'gctx> {
+@@ -678,34 +768,11 @@ impl<'gctx> DrainState<'gctx> {
+                     // from the `active` map ...
+                     Artifact::All => {
                          trace!("end: {:?}", id);
++                        self.job_ended(build_runner, id);
                          self.finished += 1;
                          let unit = self.active.remove(&id).unwrap();
 -                        // An error could add an entry for a `Unit`
@@ -227,7 +324,7 @@ index a581e11..b9cca0e 100644
                          }
                          unit
                      }
-@@ -718,7 +735,12 @@ impl<'gctx> DrainState<'gctx> {
+@@ -718,7 +785,12 @@ impl<'gctx> DrainState<'gctx> {
                  };
                  debug!("end ({:?}): {:?}", unit, result);
                  match result {
@@ -241,7 +338,7 @@ index a581e11..b9cca0e 100644
                      Err(_) if build_runner.bcx.unit_can_fail_for_docscraping(&unit) => {
                          build_runner
                              .failed_scrape_units
-@@ -728,6 +750,7 @@ impl<'gctx> DrainState<'gctx> {
+@@ -728,6 +800,7 @@ impl<'gctx> DrainState<'gctx> {
                          self.queue.finish(&unit, &artifact);
                      }
                      Err(error) => {
@@ -249,7 +346,37 @@ index a581e11..b9cca0e 100644
                          let show_warnings = true;
                          self.emit_log_messages(&unit, build_runner, show_warnings)?;
                          self.back_compat_notice(build_runner, &unit)?;
-@@ -767,6 +790,175 @@ impl<'gctx> DrainState<'gctx> {
+@@ -762,11 +835,207 @@ impl<'gctx> DrainState<'gctx> {
+             Message::SectionTiming(id, section) => {
+                 self.timings.unit_section_timing(build_runner, id, &section);
+             }
++            Message::Paused(id, file) => {
++                if self.metadata_written.contains(&file) {
++                    self.ready_to_resume.insert(id);
++                } else {
++                    self.paused.insert(id, file);
++                }
++            }
++            Message::Resumed(id) => {
++                self.paused.remove(&id);
++                self.ready_to_resume.remove(&id);
++                self.resumed.insert(id);
++            }
++            Message::MetadataWritten(file) => {
++                let ready: Vec<JobId> = self
++                    .paused
++                    .iter()
++                    .filter(|(_, waiting_for)| **waiting_for == file)
++                    .map(|(&id, _)| id)
++                    .collect();
++                for id in ready {
++                    self.paused.remove(&id);
++                    self.ready_to_resume.insert(id);
++                }
++                self.metadata_written.insert(file);
++            }
+         }
+ 
          Ok(())
      }
  
@@ -308,6 +435,7 @@ index a581e11..b9cca0e 100644
 +        if self.provisional.tainted.contains(&id) {
 +            if let Message::Finish(..) = event {
 +                self.active.remove(&id);
++                self.job_ended(build_runner, id);
 +                self.finished += 1;
 +            }
 +            return None;
@@ -320,6 +448,7 @@ index a581e11..b9cca0e 100644
 +                // Free the job slot and unblock dependents now; only the
 +                // report waits.
 +                let unit = self.active.remove(&id).unwrap();
++                self.job_ended(build_runner, id);
 +                self.finished += 1;
 +                if result.is_ok() {
 +                    if let Err(error) = self.finish(id, &unit, Artifact::All, build_runner) {
@@ -425,7 +554,16 @@ index a581e11..b9cca0e 100644
      // This will also tick the progress bar as appropriate
      fn wait_for_events(&mut self) -> Vec<Message> {
          // Drain all events at once to avoid displaying the progress bar
-@@ -843,6 +1035,9 @@ impl<'gctx> DrainState<'gctx> {
+@@ -779,7 +1048,7 @@ impl<'gctx> DrainState<'gctx> {
+         if events.is_empty() {
+             loop {
+                 self.tick_progress();
+-                self.tokens.truncate(self.active.len() - 1);
++                self.tokens.truncate(self.slot_holders().saturating_sub(1));
+                 match self.messages.pop(Duration::from_millis(500)) {
+                     Some(message) => {
+                         events.push(message);
+@@ -843,6 +1112,9 @@ impl<'gctx> DrainState<'gctx> {
                  if let Err(event_err) = self.handle_event(build_runner, event) {
                      self.handle_error(&mut build_runner.bcx.gctx.shell(), &mut errors, event_err);
                  }
@@ -435,7 +573,7 @@ index a581e11..b9cca0e 100644
              }
          }
          self.progress.clear();
-@@ -926,7 +1121,13 @@ impl<'gctx> DrainState<'gctx> {
+@@ -926,7 +1198,13 @@ impl<'gctx> DrainState<'gctx> {
          let new_err = new_err.into();
          if new_err.print_always || err_state.count == 0 {
              crate::display_error(&new_err.error, shell);
@@ -450,7 +588,7 @@ index a581e11..b9cca0e 100644
                  self.progress.indicate_error();
                  let _ = shell.warn("build failed, waiting for other jobs to finish...");
              }
-@@ -1003,6 +1204,22 @@ impl<'gctx> DrainState<'gctx> {
+@@ -1003,6 +1281,22 @@ impl<'gctx> DrainState<'gctx> {
          debug!("start {}: {:?}", id, unit);
  
          assert!(self.active.insert(id, unit.clone()).is_none());
@@ -473,7 +611,7 @@ index a581e11..b9cca0e 100644
  
          let messages = self.messages.clone();
          let is_fresh = job.freshness().is_fresh();
-@@ -1078,7 +1295,12 @@ impl<'gctx> DrainState<'gctx> {
+@@ -1078,7 +1372,12 @@ impl<'gctx> DrainState<'gctx> {
          let count = self.warning_count.entry(id).or_default();
          count.total += 1;
          if lint {
@@ -488,7 +626,7 @@ index a581e11..b9cca0e 100644
              // don't fail compilation.
              if unit.is_local() {
 diff --git a/src/compiler/mod.rs b/src/compiler/mod.rs
-index fae7bab..9d49c28 100644
+index fae7bab..ffe3200 100644
 --- a/src/compiler/mod.rs
 +++ b/src/compiler/mod.rs
 @@ -395,6 +395,8 @@ fn rustc(
@@ -549,12 +687,21 @@ index fae7bab..9d49c28 100644
      if unit.mode.is_check() {
          cmd.arg("--emit=dep-info,metadata");
      } else if !build_runner
-@@ -2359,13 +2389,28 @@ fn on_stderr_line_inner(
+@@ -2359,13 +2389,44 @@ fn on_stderr_line_inner(
      struct ArtifactNotification<'a> {
          #[serde(borrow)]
          artifact: Cow<'a, str>,
 +        #[serde(borrow, default)]
 +        emit: Option<Cow<'a, str>>,
++    }
++
++    // Paths are compared by file name, which includes the crate's hash;
++    // rustc may spell a directory differently (e.g. through a symlink).
++    fn file_name(path: &str) -> String {
++        Path::new(path)
++            .file_name()
++            .map(|name| name.to_string_lossy().into_owned())
++            .unwrap_or_default()
      }
  
      if let Ok(artifact) = serde_json::from_str::<ArtifactNotification<'_>>(compiler_message.get()) {
@@ -571,10 +718,17 @@ index fae7bab..9d49c28 100644
 +            }
 +            // Headstart: rustc paused before code generation, waiting for a
 +            // dependency's full metadata, with its jobserver token handed back.
-+            Some("wait-metadata") => debug!("waiting for `{}`", artifact.artifact),
-+            Some("resume") => debug!("resumed"),
++            Some("wait-metadata") => {
++                debug!("waiting for `{}`", artifact.artifact);
++                state.paused(file_name(&artifact.artifact));
++            }
++            Some("resume") => {
++                debug!("resumed");
++                state.resumed();
++            }
 +            _ if artifact.artifact.ends_with(".rmeta") => {
 +                debug!("looks like metadata finished early!");
++                state.metadata_written(file_name(&artifact.artifact));
 +                state.rmeta_produced();
 +            }
 +            _ => {}

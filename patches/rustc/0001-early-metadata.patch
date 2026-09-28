@@ -143,7 +143,7 @@ index da0ebce5b..245ba40f3 100644
          Ok(metadata) => metadata,
          Err(guar) => guar.raise_fatal(),
 diff --git a/compiler/rustc_metadata/src/creader.rs b/compiler/rustc_metadata/src/creader.rs
-index aea843ac0..f15524dfc 100644
+index aea843ac0..3b5f1f38b 100644
 --- a/compiler/rustc_metadata/src/creader.rs
 +++ b/compiler/rustc_metadata/src/creader.rs
 @@ -1,7 +1,7 @@
@@ -215,10 +215,12 @@ index aea843ac0..f15524dfc 100644
      f.spans
  }
 +
-+/// While this compilation waits for dependencies' full metadata, it hands its
-+/// jobserver token back so the build tool can run other work, and announces it
-+/// (a `wait-metadata` artifact notification). It takes a token again before
-+/// resuming (a `resume` notification).
++/// While this compilation waits for dependencies' full metadata, it tells the
++/// build tool (a `wait-metadata` artifact notification naming the file), which
++/// can give its job slot to other work. To resume, it takes a jobserver token
++/// and then says so (`resume`); the build tool returns that token to the
++/// jobserver when the compilation finishes, and gives freed tokens to paused
++/// compilations whose metadata is ready before starting new work.
 +#[derive(Default)]
 +struct Pause {
 +    paused: bool,
@@ -233,9 +235,6 @@ index aea843ac0..f15524dfc 100644
 +        if tcx.sess.opts.json_artifact_notifications {
 +            tcx.dcx().emit_artifact_notification(waiting_for, "wait-metadata");
 +        }
-+        // This gives up the token this process runs on, which the jobserver
-+        // proxy never does; `resume` takes one back before any more work.
-+        rustc_data_structures::jobserver::client().release_raw().ok();
 +    }
 +
 +    fn resume(&mut self, tcx: TyCtxt<'_>) {
@@ -243,8 +242,9 @@ index aea843ac0..f15524dfc 100644
 +            return;
 +        }
 +        self.paused = false;
-+        rustc_data_structures::jobserver::client().acquire_raw().ok();
++        // Only a build tool that follows the notifications gave this slot away.
 +        if tcx.sess.opts.json_artifact_notifications {
++            rustc_data_structures::jobserver::client().acquire_raw().ok();
 +            tcx.dcx().emit_artifact_notification(Path::new(""), "resume");
 +        }
 +    }

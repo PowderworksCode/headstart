@@ -1,13 +1,38 @@
 #!/usr/bin/env bash
-# RUSTC_WRAPPER that appends "<crate> <start> <end>" (seconds) to
-# $HEADSTART_LOG for each rustc run, to see when dependents start.
+# RUSTC_WRAPPER that logs, to $HEADSTART_LOG, one line per event of each rustc
+# run, with times in seconds:
+#
+#   <crate>:<id> start <t> <crate-type> <direct deps, comma-separated>
+#   <crate>:<id> <early-metadata|metadata|link|wait-metadata|resume> <t> <artifact file>
+#   <crate>:<id> end <t> <exit status>
+#
+# The id tells apart runs of the same crate name (e.g. build scripts).
+#
+# Events come from rustc's artifact notifications (`--json=artifacts`), read
+# as rustc's stderr passes through unchanged.
 rustc="$1"; shift
-crate=?
-prev=
-for a in "$@"; do [ "$prev" = --crate-name ] && crate=$a; prev=$a; done
+crate=; prev=; type=bin; deps=
+for a in "$@"; do
+  case $prev in
+    --crate-name) crate=$a ;;
+    --crate-type) type=$a ;;
+    --extern) deps="$deps${deps:+,}${a%%=*}" ;;
+  esac
+  prev=$a
+done
+if [ -z "${HEADSTART_LOG:-}" ] || [ -z "$crate" ]; then exec "$rustc" "$@"; fi
 now() { perl -MTime::HiRes=time -e 'printf "%.3f", time'; }
-start=$(now)
-"$rustc" "$@"
+crate=$crate:$$
+echo "$crate start $(now) $type ${deps:--}" >> "$HEADSTART_LOG"
+"$rustc" "$@" 2> >(perl -MTime::HiRes=time -ne '
+  BEGIN { $| = 1; open(LOG, ">>", $ENV{HEADSTART_LOG}) or die; select((select(LOG), $| = 1)[0]); }
+  print STDERR $_;
+  if (/"\$message_type":"artifact"/ && /"emit":"([^"]+)"/) {
+    my $emit = $1;
+    my ($file) = /"artifact":"(?:[^"]*\/)?([^"\/]*)"/;
+    printf LOG "%s %s %.3f %s\n", "'"$crate"'", $emit, time, $file || "-";
+  }')
 status=$?
-[ -n "${HEADSTART_LOG:-}" ] && [ "$crate" != "?" ] && echo "$crate $start $(now)" >> "$HEADSTART_LOG"
+wait
+echo "$crate end $(now) $status" >> "$HEADSTART_LOG"
 exit $status
