@@ -626,7 +626,7 @@ index a581e11..fe9add9 100644
              // don't fail compilation.
              if unit.is_local() {
 diff --git a/src/compiler/mod.rs b/src/compiler/mod.rs
-index fae7bab..ffe3200 100644
+index fae7bab..754c834 100644
 --- a/src/compiler/mod.rs
 +++ b/src/compiler/mod.rs
 @@ -395,6 +395,8 @@ fn rustc(
@@ -638,43 +638,41 @@ index fae7bab..ffe3200 100644
      return Ok(Work::new(move |state| {
          // Artifacts are in a different location than typical units,
          // hence we must assure the crate- and target-dependent
-@@ -452,6 +454,22 @@ fn rustc(
+@@ -452,6 +454,20 @@ fn rustc(
              }
          }
  
 +        // Headstart: dependents that started on this unit's early metadata
 +        // wait for its full metadata before code generation. If this unit
-+        // fails, a marker next to it tells them it won't come.
-+        let failed_markers: Vec<PathBuf> = if headstart {
++        // fails, its early metadata is withdrawn (deleted), which tells them
++        // it won't come. rustc does this itself on errors; this covers crashes.
++        let early_metadata: Vec<PathBuf> = if headstart {
 +            outputs
 +                .iter()
 +                .filter(|output| output.path.extension() == Some(OsStr::new("rmeta")))
-+                .map(|output| root.join(&output.path).with_extension("failed-rmeta"))
++                .map(|output| root.join(&output.path).with_extension("early-rmeta"))
 +                .collect()
 +        } else {
 +            Vec::new()
 +        };
-+        for marker in &failed_markers {
-+            let _ = paths::remove_file(marker);
-+        }
 +
          state.running(&rustc);
          let timestamp = paths::set_invocation_time(&fingerprint_dir)?;
          if let Some(sbom) = sbom {
-@@ -514,6 +532,12 @@ fn rustc(
+@@ -514,6 +530,12 @@ fn rustc(
                  format!("could not compile {name}{errors}{warnings}")
              });
  
 +        if result.is_err() {
-+            for marker in &failed_markers {
-+                let _ = paths::write(marker, "");
++            for path in &early_metadata {
++                let _ = paths::remove_file(path);
 +            }
 +        }
 +
          if let Err(e) = result {
              if let Some(diagnostic) = failed_scrape_diagnostic {
                  state.warning(diagnostic);
-@@ -1346,6 +1370,12 @@ fn build_base_args(
+@@ -1346,6 +1368,12 @@ fn build_base_args(
          }
      }
  
@@ -687,7 +685,7 @@ index fae7bab..ffe3200 100644
      if unit.mode.is_check() {
          cmd.arg("--emit=dep-info,metadata");
      } else if !build_runner
-@@ -2359,13 +2389,44 @@ fn on_stderr_line_inner(
+@@ -2359,13 +2387,44 @@ fn on_stderr_line_inner(
      struct ArtifactNotification<'a> {
          #[serde(borrow)]
          artifact: Cow<'a, str>,
