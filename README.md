@@ -74,6 +74,11 @@ sequence of incremental edits. The steps include adding an `impl Fn` a
 dependent calls, and breaking and then fixing an interface. It also
 compares the final state against a clean build.
 
+`scripts/check-swap.sh` makes a library start on its dependency's early
+metadata and swap in the full metadata while paused, at every
+optimization level. The program built from it must print the same as one
+built from full metadata.
+
 ## Benchmarks
 
 ```sh

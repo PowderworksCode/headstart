@@ -3,7 +3,9 @@
 # without headstart, alternating, with the same patched rustc and cargo
 # (headstart off = upstream behavior):
 #
-#   scripts/bench.sh [-n runs] [-j jobs] [-c check|build] [-o out-dir] <project dir>...
+#   scripts/bench.sh [-n runs] [-j jobs] [-c check|build] [-o out-dir] <project dir>[::cargo args]...
+#
+# For example, `vaultwarden::--features sqlite`.
 #
 # Each project is copied to <out-dir>/work first. Writes <out-dir>/runs.tsv
 # (project, mode, run, seconds, exit status) and, for each build, the
@@ -20,7 +22,7 @@ while getopts n:j:o:c: opt; do
   esac
 done
 shift $((OPTIND - 1))
-[ $# -gt 0 ] || { echo "usage: $0 [-n runs] [-j jobs] [-c check|build] [-o out-dir] <project dir>..." >&2; exit 2; }
+[ $# -gt 0 ] || { echo "usage: $0 [-n runs] [-j jobs] [-c check|build] [-o out-dir] <project dir>[::cargo args]..." >&2; exit 2; }
 
 export RUSTC=$root/rustc/build/host/stage1/bin/rustc
 export RUSTC_WRAPPER=$root/scripts/log-rustc
@@ -30,7 +32,9 @@ now() { perl -MTime::HiRes=time -e 'printf "%.3f", time'; }
 mkdir -p "$out/work" "$out/schedules"
 out=$(cd "$out" && pwd)
 [ -f "$out/runs.tsv" ] || printf 'project\tmode\trun\tseconds\tstatus\n' > "$out/runs.tsv"
-for src in "$@"; do
+for spec in "$@"; do
+  src=${spec%%::*} args=
+  [ "$src" = "$spec" ] || args=${spec#*::}
   name=$(basename "$src")
   rsync -a --delete --exclude target "$src/" "$out/work/$name/"
   (cd "$out/work/$name" && "$cargo" fetch -q) || { echo "$name: fetch failed" >&2; continue; }
@@ -42,13 +46,14 @@ for src in "$@"; do
       start=$(now)
       (cd "$out/work/$name" &&
         HEADSTART_LOG=$log CARGO_HEADSTART=$([ $mode = on ] && echo 1 || echo 0) \
-          "$cargo" "$command" -q -j "$jobs" --offline --message-format=short >/dev/null 2>"${log%.txt}.err")
+          "$cargo" "$command" -q -j "$jobs" --offline --message-format=short $args >/dev/null 2>"${log%.txt}.err")
       status=$?
       secs=$(perl -e "printf '%.2f', $(now) - $start")
       printf '%s\t%s\t%s\t%s\t%s\n' "$name" "$mode" "$run" "$secs" "$status" >> "$out/runs.tsv"
       echo "$name $mode #$run: ${secs}s (exit $status)"
     done
   done
+  rm -rf "$out/work/$name/target"
 done
 
 python3 - "$out/runs.tsv" <<'PY'

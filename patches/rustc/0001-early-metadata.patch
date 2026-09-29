@@ -700,8 +700,69 @@ index 27b36c23d..1766fd77a 100644
      pub(crate) fn dependencies(&self) -> impl Iterator<Item = CrateNum> {
          self.cnum_map.iter().copied()
      }
+diff --git a/compiler/rustc_metadata/src/rmeta/decoder/cstore_impl.rs b/compiler/rustc_metadata/src/rmeta/decoder/cstore_impl.rs
+index 154cf4f06..04b6e3616 100644
+--- a/compiler/rustc_metadata/src/rmeta/decoder/cstore_impl.rs
++++ b/compiler/rustc_metadata/src/rmeta/decoder/cstore_impl.rs
+@@ -94,6 +94,28 @@ fn process_decoded(self, _tcx: TyCtxt<'_>, _err: impl Fn() -> !) -> Option<Depre
+     }
+ }
+ 
++/// Queries that only full metadata answers; early metadata
++/// (`-Zearly-metadata`) leaves their data out. `is_mir_available` is checked
++/// where it answers no.
++const FULL_METADATA_QUERIES: &[&str] = &[
++    "cross_crate_inlinable",
++    "deduced_param_attrs",
++    "reachable_non_generics",
++    "exported_non_generic_symbols",
++    "exported_generic_symbols",
++    "required_panic_strategy",
++];
++
++/// `-Zearly-metadata-verify`: reports a query that only full metadata can
++/// answer, asked about a crate still loaded from early metadata. The answer
++/// would be wrong, and would stay cached after the full metadata is loaded.
++fn verify_not_early(tcx: TyCtxt<'_>, krate: CrateNum, query: &str) {
++    eprintln!(
++        "early-metadata-verify: `{query}` of `{}` answered from early metadata",
++        tcx.crate_name(krate)
++    );
++}
++
+ macro_rules! provide_one {
+     ($tcx:ident, $def_id:ident, $other:ident, $cdata:ident, $name:ident => { table }) => {
+         provide_one! {
+@@ -156,6 +178,12 @@ fn $name<'tcx>(
+ 
+             let cstore = CStore::from_tcx($tcx);
+             let $cdata = cstore.get_crate_data($def_id.krate);
++            if $tcx.sess.opts.unstable_opts.early_metadata_verify
++                && $cdata.is_early()
++                && FULL_METADATA_QUERIES.contains(&stringify!($name))
++            {
++                verify_not_early($tcx, $def_id.krate, stringify!($name));
++            }
+ 
+             $compute
+         }
+@@ -329,7 +357,13 @@ fn into_args(self) -> (DefId, SimplifiedType) {
+     associated_item => { cdata.get_associated_item(tcx, def_id.index) }
+     inherent_impls => { cdata.get_inherent_implementations_for_type(tcx, def_id.index) }
+     attrs_for_def => { tcx.arena.alloc_from_iter(cdata.get_item_attrs(tcx, def_id.index)) }
+-    is_mir_available => { cdata.is_item_mir_available(def_id.index) }
++    is_mir_available => {
++        let available = cdata.is_item_mir_available(def_id.index);
++        if !available && tcx.sess.opts.unstable_opts.early_metadata_verify && cdata.is_early() {
++            verify_not_early(tcx, def_id.krate, "is_mir_available");
++        }
++        available
++    }
+     cross_crate_inlinable => { table_direct }
+ 
+     dylib_dependency_formats => { cdata.get_dylib_dependency_formats(tcx) }
 diff --git a/compiler/rustc_metadata/src/rmeta/encoder.rs b/compiler/rustc_metadata/src/rmeta/encoder.rs
-index afa5646be..a69f02391 100644
+index afa5646be..6f06d81de 100644
 --- a/compiler/rustc_metadata/src/rmeta/encoder.rs
 +++ b/compiler/rustc_metadata/src/rmeta/encoder.rs
 @@ -10,7 +10,7 @@
@@ -1121,7 +1182,7 @@ index afa5646be..a69f02391 100644
 -                for &def_id in associated_item_def_ids {
 -                    self.encode_info_for_assoc_item(def_id);
 -                }
-             }
+-            }
 -            if let DefKind::Closure | DefKind::SyntheticCoroutineBody = def_kind
 -                && let Some(coroutine_kind) = self.tcx.coroutine_kind(def_id)
 -            {
@@ -1159,7 +1220,7 @@ index afa5646be..a69f02391 100644
 -                        },
 -                    };
 -                }
--            }
+             }
 -            if let DefKind::Enum | DefKind::Struct | DefKind::Union = def_kind {
 -                self.encode_info_for_adt(local_id);
 +        }
@@ -1295,7 +1356,7 @@ index afa5646be..a69f02391 100644
          }
      }
  
-@@ -1859,72 +1911,220 @@ fn encode_precise_capturing_args(&mut self, def_id: DefId) {
+@@ -1859,77 +1911,247 @@ fn encode_precise_capturing_args(&mut self, def_id: DefId) {
          record_array!(self.tables.rendered_precise_capturing_args[def_id] <- precise_capturing_args);
      }
  
@@ -1447,7 +1508,6 @@ index afa5646be..a69f02391 100644
 +        let tcx = self.tcx;
 +        if self.interface_bodies.is_none() {
 +            let mut bodies = FxHashSet::default();
-+            let unreachable = LocalDefIdSet::default();
 +            for &def_id in tcx.mir_keys(()) {
 +                if self.early_enclosing_body(def_id).is_some() {
 +                    continue;
@@ -1460,7 +1520,7 @@ index afa5646be..a69f02391 100644
 -                    if let Some(body) = body {
 -                        let const_data = rendered_const(self.tcx, &body, def_id);
 -                        record!(self.tables.rendered_const[def_id.to_def_id()] <- const_data);
-+                let (encode_const, encode_opt) = should_encode_mir(tcx, &unreachable, def_id);
++                let (encode_const, encode_opt) = self.should_encode_mir(def_id);
 +                if encode_const || encode_opt {
 +                    bodies.insert(tcx.typeck_root_def_id_local(def_id));
 +                }
@@ -1540,20 +1600,39 @@ index afa5646be..a69f02391 100644
 +        }
 +    }
 +
++    /// `should_encode_mir`, for the kind of metadata being written.
++    ///
++    /// Early metadata records optimized MIR only for coroutines, whose
++    /// layout dependents compute during analysis (the MIR inliner leaves
++    /// coroutine bodies alone). Optimizing any other body would type-check
++    /// it, and would run the MIR inliner, which asks dependencies loaded
++    /// from early metadata whether they have MIR. They say no, and that
++    /// answer would stay cached after their full metadata is loaded.
++    ///
++    /// Early metadata doesn't consult the reachable set either: computing it
++    /// walks the bodies of inline and generic functions.
++    fn should_encode_mir(&self, def_id: LocalDefId) -> (bool, bool) {
++        let tcx = self.tcx;
++        if !self.early {
++            return should_encode_mir(tcx, tcx.reachable_set(()), def_id);
++        }
++        let (encode_const, encode_opt) = should_encode_mir(tcx, &LocalDefIdSet::default(), def_id);
++        let coroutine = match tcx.def_kind(def_id) {
++            DefKind::Closure => tcx.is_coroutine(def_id.to_def_id()),
++            DefKind::SyntheticCoroutineBody => true,
++            _ => false,
++        };
++        (encode_const, encode_opt && coroutine)
++    }
++
 +    fn encode_mir(&mut self) {
 +        if self.is_proc_macro {
 +            return;
 +        }
 +
 +        let tcx = self.tcx;
-+        // `should_encode_mir` only consults the reachable set when generating
-+        // code, and computing it walks the bodies of inline and generic
-+        // functions. With `-Zearly-metadata` (never codegen), skip it.
-+        let unreachable = LocalDefIdSet::default();
-+        let reachable_set = if self.early { &unreachable } else { tcx.reachable_set(()) };
-+
 +        let keys_and_jobs = tcx.mir_keys(()).iter().filter_map(|&def_id| {
-+            let (encode_const, encode_opt) = should_encode_mir(tcx, reachable_set, def_id);
++            let (encode_const, encode_opt) = self.should_encode_mir(def_id);
 +            if encode_const || encode_opt { Some((def_id, encode_const, encode_opt)) } else { None }
 +        });
 +        for (def_id, encode_const, encode_opt) in keys_and_jobs.collect::<Vec<_>>() {
@@ -1566,7 +1645,17 @@ index afa5646be..a69f02391 100644
  
          // Encode all the deduced parameter attributes for everything that has MIR, even for items
          // that can't be inlined. But don't if we aren't optimizing in non-incremental mode, to
-@@ -2543,13 +2743,17 @@ pub fn encode_metadata(tcx: TyCtxt<'_>, path: &Path, ref_path: Option<&Path>) {
+         // save the query traffic.
+-        if tcx.sess.opts.output_types.should_codegen()
++        //
++        // Not in early metadata: deducing them optimizes every body, and only code generation
++        // reads them, from full metadata.
++        if !self.early
++            && tcx.sess.opts.output_types.should_codegen()
+             && tcx.sess.opts.optimize != OptLevel::No
+             && tcx.sess.opts.incremental.is_none()
+         {
+@@ -2543,13 +2765,17 @@ pub fn encode_metadata(tcx: TyCtxt<'_>, path: &Path, ref_path: Option<&Path>) {
          let owned = slice_owned(mmap, Deref::deref);
          let blob = MetadataBlob::new(owned);
          let hash = blob.expect("file already created").get_crate_hash();
@@ -1586,7 +1675,7 @@ index afa5646be..a69f02391 100644
                  let header: LazyValue<CrateHeader> = ecx.lazy(CrateHeader {
                      name: tcx.crate_name(LOCAL_CRATE),
                      triple: tcx.sess.opts.target_triple.clone(),
-@@ -2582,7 +2786,7 @@ pub fn encode_metadata(tcx: TyCtxt<'_>, path: &Path, ref_path: Option<&Path>) {
+@@ -2582,7 +2808,7 @@ pub fn encode_metadata(tcx: TyCtxt<'_>, path: &Path, ref_path: Option<&Path>) {
          dep_node,
          tcx,
          || {
@@ -1595,7 +1684,7 @@ index afa5646be..a69f02391 100644
                  // Encode all the entries and extra information in the crate,
                  // culminating in the `CrateRoot` which points to all of it.
                  let (root, unhashed) = ecx.encode_crate_root();
-@@ -2606,7 +2810,7 @@ pub fn encode_metadata(tcx: TyCtxt<'_>, path: &Path, ref_path: Option<&Path>) {
+@@ -2606,7 +2832,7 @@ pub fn encode_metadata(tcx: TyCtxt<'_>, path: &Path, ref_path: Option<&Path>) {
      if let Some(ref_path) = ref_path {
          let _prof_timer = tcx.prof.verbose_generic_activity("generate_crate_metadata_stub");
  
@@ -1604,7 +1693,7 @@ index afa5646be..a69f02391 100644
              let header: LazyValue<CrateHeader> = ecx.lazy(CrateHeader {
                  name: tcx.crate_name(LOCAL_CRATE),
                  triple: tcx.sess.opts.target_triple.clone(),
-@@ -2618,9 +2822,24 @@ pub fn encode_metadata(tcx: TyCtxt<'_>, path: &Path, ref_path: Option<&Path>) {
+@@ -2618,9 +2844,24 @@ pub fn encode_metadata(tcx: TyCtxt<'_>, path: &Path, ref_path: Option<&Path>) {
      }
  }
  
@@ -1629,7 +1718,7 @@ index afa5646be..a69f02391 100644
      f: impl FnOnce(&mut EncodeContext<'_, '_>) -> (usize, usize),
  ) {
      // By default the crate hash (SVH) is computed from the bytes of the encoded metadata,
-@@ -2691,6 +2910,10 @@ fn with_encode_metadata_header(
+@@ -2691,6 +2932,10 @@ fn with_encode_metadata_header(
          is_proc_macro: tcx.crate_types().contains(&CrateType::ProcMacro),
          hygiene_ctxt: Default::default(),
          symbol_index_table: Default::default(),

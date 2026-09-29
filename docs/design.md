@@ -121,8 +121,19 @@ Everything else waits until after the write.
   reports any left-out definition whose body was type-checked during the
   write anyway, which would be a body the set missed. The benchmark sweep
   reports none (see [results.md](results.md)).
-- **MIR of generic and inline functions.** Dependents need it only for
-  code generation, from full metadata.
+- **Optimized MIR of functions, and their deduced parameter
+  attributes.** Dependents need them only for code generation, from full
+  metadata. Only coroutines' optimized MIR is in early metadata, because
+  dependents compute a future's layout during analysis.
+
+  Computing any other function's optimized MIR would type-check its body.
+  It would also run the MIR inliner, which asks each dependency whether
+  it has MIR for the callee. A dependency loaded from early metadata says
+  no, and the query system would keep that answer after the swap to full
+  metadata. With optimization on, a dependent then fails to find MIR it
+  needs for code generation. `-Zearly-metadata-verify` reports any query
+  that only full metadata can answer when it's asked about a crate still
+  loaded from early metadata.
 - **Exported symbols, the reachable set and the panic strategy.**
   Computing them collects the crate's monomorphizations, or walks its
   bodies. Only code generation and linking read them, from full metadata.
