@@ -43,7 +43,9 @@ just as it writes full metadata after analysis:
 2. `write_early_metadata`:
    - evaluate statics and synthesize async closures' by-move bodies, the
      only definitions that checking bodies would add (encoding freezes
-     the definitions table);
+     the definitions table). Like body checking, this runs in parallel
+     under `-Zthreads`, and so does computing the MIR of consts and
+     const fns for the encoder;
    - encode `libfoo-hash.early-rmeta`;
    - announce it with an `early-metadata` artifact notification.
 3. `analysis`: the bodies.
@@ -134,6 +136,11 @@ Everything else waits until after the write.
   needs for code generation. `-Zearly-metadata-verify` reports any query
   that only full metadata can answer when it's asked about a crate still
   loaded from early metadata.
+
+  A crate compiled without code generation (`cargo check`) never swaps in
+  its dependencies' full metadata, so its own full metadata skips the
+  reachable set too. Upstream computes it there but never reads it, and
+  at opt-level 1 or more computing it runs the MIR inliner.
 - **Exported symbols, the reachable set and the panic strategy.**
   Computing them collects the crate's monomorphizations, or walks its
   bodies. Only code generation and linking read them, from full metadata.

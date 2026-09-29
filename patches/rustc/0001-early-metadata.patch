@@ -43,7 +43,7 @@ index dbbf06818..7a54d9683 100644
          let def_kind = tcx.def_kind(item_def_id);
          // Make sure we evaluate all static and (non-associated) const items, even if unused.
 diff --git a/compiler/rustc_interface/src/passes.rs b/compiler/rustc_interface/src/passes.rs
-index da0ebce5b..3dbd7e0d1 100644
+index da0ebce5b..213ed178f 100644
 --- a/compiler/rustc_interface/src/passes.rs
 +++ b/compiler/rustc_interface/src/passes.rs
 @@ -892,6 +892,7 @@ pub fn write_interface<'tcx>(tcx: TyCtxt<'tcx>) {
@@ -131,9 +131,9 @@ index da0ebce5b..3dbd7e0d1 100644
 +    }
 +    // Encoding freezes the definitions table, so first create the
 +    // definitions that checking bodies adds: statics' nested allocations and
-+    // async closures' by-move bodies. This checks those bodies now (in
-+    // order, as `check_crate_bodies` does, for reproducible `DefId`s).
-+    tcx.hir_body_owners().for_each(|def_id| {
++    // async closures' by-move bodies. This checks those bodies now, the way
++    // `check_crate_bodies` would (in parallel under `-Zthreads`).
++    tcx.par_hir_body_owners(|def_id| {
 +        if let rustc_hir::def::DefKind::Static { .. } = tcx.def_kind(def_id) {
 +            tcx.ensure_ok().eval_static_initializer(def_id);
 +        }
@@ -762,7 +762,7 @@ index 154cf4f06..04b6e3616 100644
  
      dylib_dependency_formats => { cdata.get_dylib_dependency_formats(tcx) }
 diff --git a/compiler/rustc_metadata/src/rmeta/encoder.rs b/compiler/rustc_metadata/src/rmeta/encoder.rs
-index afa5646be..6f06d81de 100644
+index afa5646be..aed1effc4 100644
 --- a/compiler/rustc_metadata/src/rmeta/encoder.rs
 +++ b/compiler/rustc_metadata/src/rmeta/encoder.rs
 @@ -10,7 +10,7 @@
@@ -1182,7 +1182,7 @@ index afa5646be..6f06d81de 100644
 -                for &def_id in associated_item_def_ids {
 -                    self.encode_info_for_assoc_item(def_id);
 -                }
--            }
+             }
 -            if let DefKind::Closure | DefKind::SyntheticCoroutineBody = def_kind
 -                && let Some(coroutine_kind) = self.tcx.coroutine_kind(def_id)
 -            {
@@ -1220,7 +1220,7 @@ index afa5646be..6f06d81de 100644
 -                        },
 -                    };
 -                }
-             }
+-            }
 -            if let DefKind::Enum | DefKind::Struct | DefKind::Union = def_kind {
 -                self.encode_info_for_adt(local_id);
 +        }
@@ -1356,7 +1356,7 @@ index afa5646be..6f06d81de 100644
          }
      }
  
-@@ -1859,77 +1911,247 @@ fn encode_precise_capturing_args(&mut self, def_id: DefId) {
+@@ -1859,77 +1911,256 @@ fn encode_precise_capturing_args(&mut self, def_id: DefId) {
          record_array!(self.tables.rendered_precise_capturing_args[def_id] <- precise_capturing_args);
      }
  
@@ -1578,15 +1578,15 @@ index afa5646be..6f06d81de 100644
 +                self.encode_mir_for(def_id, c, o);
 +            } else if verify {
 +                self.report_missed_body(def_id, body);
-             }
-         }
++            }
++        }
 +        for (def_id, body) in std::mem::take(&mut self.deferred_defs) {
 +            if self.interface_bodies().contains(&body) {
 +                self.encode_def_id(def_id);
 +            } else if verify {
 +                self.report_missed_body(def_id, body);
-+            }
-+        }
+             }
+         }
 +    }
 +
 +    fn report_missed_body(&self, def_id: LocalDefId, body: LocalDefId) {
@@ -1610,11 +1610,20 @@ index afa5646be..6f06d81de 100644
 +    /// answer would stay cached after their full metadata is loaded.
 +    ///
 +    /// Early metadata doesn't consult the reachable set either: computing it
-+    /// walks the bodies of inline and generic functions.
++    /// walks the bodies of inline and generic functions. Neither does
++    /// metadata written without code generation, which never reads it. With
++    /// `-Zearly-metadata`, dependencies may still be loaded from early
++    /// metadata then, and optimizing those bodies would ask them for MIR.
 +    fn should_encode_mir(&self, def_id: LocalDefId) -> (bool, bool) {
 +        let tcx = self.tcx;
-+        if !self.early {
++        if !self.early
++            && (tcx.sess.opts.output_types.should_codegen()
++                || !tcx.sess.opts.unstable_opts.early_metadata)
++        {
 +            return should_encode_mir(tcx, tcx.reachable_set(()), def_id);
++        }
++        if !self.early {
++            return should_encode_mir(tcx, &LocalDefIdSet::default(), def_id);
 +        }
 +        let (encode_const, encode_opt) = should_encode_mir(tcx, &LocalDefIdSet::default(), def_id);
 +        let coroutine = match tcx.def_kind(def_id) {
@@ -1655,7 +1664,35 @@ index afa5646be..6f06d81de 100644
              && tcx.sess.opts.optimize != OptLevel::No
              && tcx.sess.opts.incremental.is_none()
          {
-@@ -2543,13 +2765,17 @@ pub fn encode_metadata(tcx: TyCtxt<'_>, path: &Path, ref_path: Option<&Path>) {
+@@ -2401,6 +2632,27 @@ fn prefetch_mir(tcx: TyCtxt<'_>) {
+     })
+ }
+ 
++/// `prefetch_mir` for early metadata: the MIR of consts and const fns.
++/// Anonymous consts are left alone: those in bodies (const arguments,
++/// array lengths) are typed by type-checking the enclosing body.
++fn prefetch_early_mir(tcx: TyCtxt<'_>) {
++    let unreachable = LocalDefIdSet::default();
++    par_for_each_in(tcx.mir_keys(()), |&&def_id| {
++        if !matches!(
++            tcx.def_kind(def_id),
++            DefKind::Const | DefKind::AssocConst | DefKind::Fn | DefKind::AssocFn
++        ) || tcx.is_trivial_const(def_id)
++        {
++            return;
++        }
++        let (encode_const, _) = should_encode_mir(tcx, &unreachable, def_id);
++        if encode_const {
++            tcx.ensure_done().mir_for_ctfe(def_id);
++            tcx.ensure_done().promoted_mir(def_id);
++        }
++    })
++}
++
+ // NOTE(eddyb) The following comment was preserved for posterity, even
+ // though it's no longer relevant as EBML (which uses nested & tagged
+ // "documents") was replaced with a scheme that can't go out of bounds.
+@@ -2543,13 +2795,17 @@ pub fn encode_metadata(tcx: TyCtxt<'_>, path: &Path, ref_path: Option<&Path>) {
          let owned = slice_owned(mmap, Deref::deref);
          let blob = MetadataBlob::new(owned);
          let hash = blob.expect("file already created").get_crate_hash();
@@ -1675,7 +1712,7 @@ index afa5646be..6f06d81de 100644
                  let header: LazyValue<CrateHeader> = ecx.lazy(CrateHeader {
                      name: tcx.crate_name(LOCAL_CRATE),
                      triple: tcx.sess.opts.target_triple.clone(),
-@@ -2582,7 +2808,7 @@ pub fn encode_metadata(tcx: TyCtxt<'_>, path: &Path, ref_path: Option<&Path>) {
+@@ -2582,7 +2838,7 @@ pub fn encode_metadata(tcx: TyCtxt<'_>, path: &Path, ref_path: Option<&Path>) {
          dep_node,
          tcx,
          || {
@@ -1684,7 +1721,7 @@ index afa5646be..6f06d81de 100644
                  // Encode all the entries and extra information in the crate,
                  // culminating in the `CrateRoot` which points to all of it.
                  let (root, unhashed) = ecx.encode_crate_root();
-@@ -2606,7 +2832,7 @@ pub fn encode_metadata(tcx: TyCtxt<'_>, path: &Path, ref_path: Option<&Path>) {
+@@ -2606,7 +2862,7 @@ pub fn encode_metadata(tcx: TyCtxt<'_>, path: &Path, ref_path: Option<&Path>) {
      if let Some(ref_path) = ref_path {
          let _prof_timer = tcx.prof.verbose_generic_activity("generate_crate_metadata_stub");
  
@@ -1693,7 +1730,7 @@ index afa5646be..6f06d81de 100644
              let header: LazyValue<CrateHeader> = ecx.lazy(CrateHeader {
                  name: tcx.crate_name(LOCAL_CRATE),
                  triple: tcx.sess.opts.target_triple.clone(),
-@@ -2618,9 +2844,24 @@ pub fn encode_metadata(tcx: TyCtxt<'_>, path: &Path, ref_path: Option<&Path>) {
+@@ -2618,9 +2874,28 @@ pub fn encode_metadata(tcx: TyCtxt<'_>, path: &Path, ref_path: Option<&Path>) {
      }
  }
  
@@ -1704,6 +1741,10 @@ index afa5646be..6f06d81de 100644
 +pub fn encode_early_metadata(tcx: TyCtxt<'_>, path: &Path) {
 +    tcx.dep_graph.assert_ignored();
 +    let _prof_timer = tcx.prof.verbose_generic_activity("generate_crate_metadata_early");
++    if tcx.sess.opts.jobs.frontend.is_some() {
++        // As for full metadata: not necessary for correctness, only for performance.
++        prefetch_early_mir(tcx);
++    }
 +    with_encode_metadata_header(tcx, path, true, |ecx| {
 +        let (root, unhashed) = ecx.encode_crate_root();
 +        ecx.opaque.flush();
@@ -1718,7 +1759,7 @@ index afa5646be..6f06d81de 100644
      f: impl FnOnce(&mut EncodeContext<'_, '_>) -> (usize, usize),
  ) {
      // By default the crate hash (SVH) is computed from the bytes of the encoded metadata,
-@@ -2691,6 +2932,10 @@ fn with_encode_metadata_header(
+@@ -2691,6 +2966,10 @@ fn with_encode_metadata_header(
          is_proc_macro: tcx.crate_types().contains(&CrateType::ProcMacro),
          hygiene_ctxt: Default::default(),
          symbol_index_table: Default::default(),
