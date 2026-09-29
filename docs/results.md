@@ -137,7 +137,7 @@ end of the check runs.
 | encoding | 0.95 s | 0.96 s | −1% | 0.79 s | 0.78 s | 1% |
 | regex-automata-0.4.8 | 3.69 s | 3.76 s | −2% | 2.43 s | 2.59 s | −7% |
 
-- The two stack: headstart still saves 10–26% on chain-shaped builds,
+- The two stack: headstart still saves 13–26% on chain-shaped builds (ripgrep, clap_derive, html5ever, hyper),
   and a few percent on the large ones, where the parallel front end
   already fills the cores.
 - **regex-automata is slower,** in every check run (2.42–2.47 s off,
