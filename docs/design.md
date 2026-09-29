@@ -171,9 +171,14 @@ When rustc has to wait for a dependency's full metadata or rlib:
    and polls for it.
 2. The build tool stops counting it as running, so its job slot can go to
    other work.
-3. To continue, rustc takes a jobserver token and announces `resume`. The
-   build tool returns that token to the jobserver when the compilation
-   finishes.
+3. Once the file exists, rustc announces `resume` and continues. The
+   build tool counts it as running again.
+
+rustc never touches the jobserver for this. A resumed compilation can
+briefly put the build one job over its limit, until the next job
+finishes. Making it wait for a free slot instead starved it: it
+competed for tokens with work started in its place, often on the
+critical path (see [results.md](results.md)).
 
 The crate graph has no cycles, so what a paused compilation waits for is
 always running or queued, and waiting can't deadlock.
@@ -209,12 +214,9 @@ With the variable set:
 - **Pause accounting.**
   - A paused compilation (a `wait-metadata` notification) doesn't count as
     running, so its slot goes to other work.
-  - Once the file it waits for is written (a `metadata` or `link`
-    notification), cargo starts no new work until it has resumed. That
-    way it takes the next freed token, instead of being starved by work
-    started in its place.
-  - The token it resumed with goes back to the jobserver when it
-    finishes.
+  - When it announces `resume`, it counts as running again. Cargo starts
+    no new work until the number of running jobs is back under the
+    limit.
 - **Retraction.** When a unit fails, cargo deletes its early metadata, in
   case rustc crashed before it could.
 - **Only error-free dependencies get their output reported.** A unit that

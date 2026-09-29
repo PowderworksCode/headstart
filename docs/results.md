@@ -9,8 +9,8 @@ With headstart off, both behave like upstream. Tables give medians.
 The first sections cover the current version: early metadata as a
 separate file, used by both `cargo check` and `cargo build`. The later
 sections are measurements of the first, check-only version. They're kept
-for the error-delay, memory, parallel front end and incremental numbers,
-which the current version doesn't change for `cargo check`.
+for the error-delay, memory and incremental numbers, which the current
+version doesn't change for `cargo check`.
 
 ## Correctness (current version)
 
@@ -49,76 +49,103 @@ The sweeps found two bugs in the swap to full metadata, both fixed:
   cargo-0.87.1 and large-workspace.
 - **Stale-looking full metadata.** Incremental compilation reused a full
   `.rmeta` by hard-linking it, which kept its old modification time, so
-  it looked older than this compilation's early metadata. Rustc now
-  decides between the two files by crate hash, not by age.
+  it looked older than this compilation's early metadata. Writing early
+  metadata now deletes the crate's stale full metadata and rlib first,
+  so a full file next to early metadata is never an older one.
 
-## Timing: `cargo build` (debug), Linux, AMD EPYC 9554P, 16 jobs, 5 runs
+## Timing, current version: Linux, AMD EPYC 9554P, 16 jobs, 5 runs
 
-The runs started once the VM was idle (load average 0.8). In 20 of 21
-benchmarks, every run with headstart was faster than every run without
-it; the exception is encoding, the smallest.
+Build and check were measured back to back in one session, alternating
+headstart off and on. Another user's two long-running compilations kept
+the VM's load average at 3–5 throughout. Off and on runs share that
+load equally, so the savings compare, but absolute times are a little
+higher than on an idle machine. All 420 builds succeeded.
 
-| project | today | headstart | saved |
-|---|--:|--:|--:|
-| piston-image | 8.40 s | 5.72 s | 32% |
-| unicode-normalization-0.1.24 | 2.12 s | 1.61 s | 24% |
-| ripgrep-14.1.1 | 15.00 s | 11.60 s | 23% |
-| nalgebra-0.33.0 | 24.16 s | 19.00 s | 21% |
-| eza-0.21.2 | 32.49 s | 26.17 s | 19% |
-| wg-grammar | 10.78 s | 8.69 s | 19% |
-| hyper-1.6.0 | 2.84 s | 2.32 s | 18% |
-| image-0.25.6 | 26.14 s | 21.56 s | 18% |
-| regex-automata-0.4.8 | 9.41 s | 7.72 s | 18% |
-| syn-2.0.101 | 5.20 s | 4.42 s | 15% |
-| html5ever-0.31.0 | 8.23 s | 7.15 s | 13% |
-| html5ever | 17.23 s | 15.22 s | 12% |
-| cargo-0.87.1 | 93.07 s | 82.76 s | 11% |
-| tt-muncher | 2.42 s | 2.18 s | 10% |
-| serde_derive-1.0.219 | 8.38 s | 7.61 s | 9% |
-| clap_derive-4.5.32 | 8.44 s | 7.73 s | 8% |
-| cranelift-codegen-0.119.0 | 29.01 s | 26.99 s | 7% |
-| diesel-2.2.10 | 40.71 s | 37.90 s | 7% |
-| cargo (old) | 30.10 s | 28.32 s | 6% |
-| encoding | 1.50 s | 1.41 s | 6% |
-| projection-caching | 11.86 s | 11.11 s | 6% |
+"Previous" is the saving measured for the version before this one, on
+an idle VM (commit 0a09236). Since then:
 
-Each dependent's analysis overlaps its dependencies' body checking. It
-then waits for full metadata only before code generation, and by then
-its analysis is usually done.
+- binaries, tests, proc macros and build scripts also start on early
+  metadata, and wait for rlibs only before linking;
+- a resumed compilation no longer waits for a free job slot (see
+  [design.md](design.md#pausing)). Measured with `scripts/critical-path.py`,
+  resumed compilations on the critical path had spent seconds waiting
+  for a slot while work started in their place held it.
 
-## Timing: `cargo check`, current version
+| project | build today | build headstart | saved | previous | check today | check headstart | saved | previous |
+|---|--:|--:|--:|--:|--:|--:|--:|--:|
+| ripgrep-14.1.1 | 15.01 s | 9.88 s | 34% | 23% | 10.15 s | 5.53 s | 46% | 47% |
+| serde_derive-1.0.219 | 8.33 s | 5.23 s | 37% | 9% | 5.62 s | 3.61 s | 36% | 35% |
+| piston-image | 8.33 s | 5.72 s | 31% | 32% | 6.11 s | 3.99 s | 35% | 36% |
+| eza-0.21.2 | 33.36 s | 21.79 s | 35% | 19% | 27.03 s | 18.94 s | 30% | 30% |
+| clap_derive-4.5.32 | 7.89 s | 5.73 s | 27% | 8% | 5.83 s | 4.06 s | 30% | 31% |
+| unicode-normalization-0.1.24 | 2.13 s | 1.62 s | 24% | 24% | 1.90 s | 1.32 s | 31% | 31% |
+| tt-muncher | 2.30 s | 1.56 s | 32% | 10% | 1.79 s | 1.29 s | 28% | 28% |
+| image-0.25.6 | 26.07 s | 20.35 s | 22% | 18% | 19.32 s | 13.94 s | 28% | 23% |
+| html5ever | 16.93 s | 12.35 s | 27% | 12% | 16.61 s | 12.18 s | 27% | 13% |
+| hyper-1.6.0 | 2.87 s | 2.19 s | 24% | 18% | 2.41 s | 1.84 s | 24% | 22% |
+| nalgebra-0.33.0 | 24.11 s | 18.46 s | 23% | 21% | 22.57 s | 17.61 s | 22% | 20% |
+| regex-automata-0.4.8 | 9.56 s | 7.50 s | 22% | 18% | 6.73 s | 5.28 s | 22% | 21% |
+| wg-grammar | 10.51 s | 8.25 s | 22% | 19% | 9.91 s | 7.98 s | 19% | 15% |
+| cargo-0.87.1 | 95.71 s | 83.35 s | 13% | 11% | 51.17 s | 41.48 s | 19% | 22% |
+| cargo | 30.04 s | 25.26 s | 16% | 6% | 20.76 s | 17.00 s | 18% | 18% |
+| html5ever-0.31.0 | 8.30 s | 6.84 s | 18% | 13% | 7.62 s | 6.47 s | 15% | 11% |
+| projection-caching | 11.63 s | 10.11 s | 13% | 6% | 11.18 s | 9.50 s | 15% | 9% |
+| syn-2.0.101 | 4.93 s | 4.26 s | 14% | 15% | 3.51 s | 3.06 s | 13% | 14% |
+| diesel-2.2.10 | 40.44 s | 36.78 s | 9% | 7% | 38.18 s | 34.74 s | 9% | 7% |
+| cranelift-codegen-0.119.0 | 28.86 s | 26.45 s | 8% | 7% | 19.99 s | 18.17 s | 9% | 8% |
+| encoding | 1.48 s | 1.39 s | 6% | 6% | 1.10 s | 1.04 s | 5% | 8% |
 
-Same benchmarks and machine, again 5 runs per benchmark, starting from an
-idle VM (load average 0.6). In 21 of 21 benchmarks, every run with
-headstart was faster than every run without it.
+- **`cargo build` gains most.** Proc-macro chains (serde_derive,
+  clap_derive) and binaries at the end of the graph (eza, ripgrep,
+  html5ever) no longer wait for every rlib to be finished before they
+  start.
+- **`cargo check`** changes less, since check units already started on
+  early metadata. The largest gains (html5ever, projection-caching,
+  image) come from binaries starting early and from the pause fix.
+- **The slot-waiting variant in between** (commit 8c1b8a4) made cargo-0.87.1 8% slower to build and 19% slower to
+  check: cargo held back new work until a resumed compilation got a
+  slot, while it competed for slots with libgit2's C build. Resuming
+  without a slot fixed that.
 
-| project | today | headstart | saved |
-|---|--:|--:|--:|
-| ripgrep-14.1.1 | 10.37 s | 5.49 s | 47% |
-| piston-image | 6.33 s | 4.02 s | 36% |
-| serde_derive-1.0.219 | 5.81 s | 3.75 s | 35% |
-| clap_derive-4.5.32 | 6.08 s | 4.22 s | 31% |
-| unicode-normalization-0.1.24 | 2.00 s | 1.37 s | 31% |
-| eza-0.21.2 | 27.78 s | 19.56 s | 30% |
-| tt-muncher | 1.87 s | 1.35 s | 28% |
-| image-0.25.6 | 19.25 s | 14.84 s | 23% |
-| cargo-0.87.1 | 52.45 s | 41.07 s | 22% |
-| hyper-1.6.0 | 2.47 s | 1.92 s | 22% |
-| regex-automata-0.4.8 | 6.96 s | 5.51 s | 21% |
-| nalgebra-0.33.0 | 22.80 s | 18.25 s | 20% |
-| cargo (old) | 21.35 s | 17.43 s | 18% |
-| wg-grammar | 10.21 s | 8.65 s | 15% |
-| syn-2.0.101 | 3.60 s | 3.09 s | 14% |
-| html5ever | 16.92 s | 14.71 s | 13% |
-| html5ever-0.31.0 | 7.79 s | 6.91 s | 11% |
-| projection-caching | 11.19 s | 10.19 s | 9% |
-| cranelift-codegen-0.119.0 | 20.36 s | 18.75 s | 8% |
-| encoding | 1.16 s | 1.07 s | 8% |
-| diesel-2.2.10 | 39.22 s | 36.33 s | 7% |
+## With the parallel front end, current version (`RUSTFLAGS=-Zthreads=8`)
 
-Compared with the first, check-only version, nothing is slower any more.
-The html5ever benchmarks were flat before (−1% to −2%) and gain 11–13%
-now.
+The same 21 benchmarks and session, straight after the table above,
+with `-Zthreads=8` on both sides. The load average rose to about 9 by the
+end of the check runs.
+
+| project | build today | build headstart | saved | check today | check headstart | saved |
+|---|--:|--:|--:|--:|--:|--:|
+| unicode-normalization-0.1.24 | 1.25 s | 1.01 s | 19% | 1.21 s | 0.89 s | 26% |
+| clap_derive-4.5.32 | 3.67 s | 2.73 s | 26% | 2.62 s | 2.09 s | 20% |
+| ripgrep-14.1.1 | 8.01 s | 6.51 s | 19% | 4.28 s | 3.42 s | 20% |
+| projection-caching | 5.10 s | 4.28 s | 16% | 4.86 s | 3.91 s | 20% |
+| hyper-1.6.0 | 1.30 s | 1.13 s | 13% | 1.18 s | 0.97 s | 18% |
+| html5ever | 8.27 s | 6.74 s | 19% | 7.95 s | 6.77 s | 15% |
+| serde_derive-1.0.219 | 4.19 s | 3.47 s | 17% | 2.53 s | 2.17 s | 14% |
+| tt-muncher | 1.88 s | 1.55 s | 18% | 1.49 s | 1.29 s | 13% |
+| piston-image | 4.27 s | 3.98 s | 7% | 2.93 s | 2.58 s | 12% |
+| html5ever-0.31.0 | 4.01 s | 3.64 s | 9% | 3.82 s | 3.44 s | 10% |
+| cargo | 18.48 s | 16.23 s | 12% | 13.93 s | 12.75 s | 8% |
+| nalgebra-0.33.0 | 8.30 s | 7.56 s | 9% | 7.87 s | 7.22 s | 8% |
+| image-0.25.6 | 14.15 s | 13.36 s | 6% | 9.18 s | 8.54 s | 7% |
+| diesel-2.2.10 | 14.35 s | 13.37 s | 7% | 14.34 s | 13.35 s | 7% |
+| wg-grammar | 5.84 s | 5.23 s | 10% | 5.65 s | 5.23 s | 7% |
+| syn-2.0.101 | 2.36 s | 2.21 s | 6% | 1.73 s | 1.63 s | 6% |
+| cranelift-codegen-0.119.0 | 13.96 s | 13.81 s | 1% | 10.03 s | 9.66 s | 4% |
+| cargo-0.87.1 | 54.76 s | 52.56 s | 4% | 30.48 s | 29.47 s | 3% |
+| eza-0.21.2 | 18.05 s | 16.92 s | 6% | 14.64 s | 14.34 s | 2% |
+| encoding | 0.95 s | 0.96 s | −1% | 0.79 s | 0.78 s | 1% |
+| regex-automata-0.4.8 | 3.69 s | 3.76 s | −2% | 2.43 s | 2.59 s | −7% |
+
+- The two stack: headstart still saves 10–26% on chain-shaped builds,
+  and a few percent on the large ones, where the parallel front end
+  already fills the cores.
+- **regex-automata is slower,** in every check run (2.42–2.47 s off,
+  2.56–2.76 s on) and slightly in build. It was 4% slower in the earlier
+  measurement too. With its analysis already spread over threads,
+  little is left to overlap, and the early write costs something.
+- cargo-0.87.1 was faster with headstart in all 5 runs of each, by
+  0.2–1.6 s in check and 1.6–3.5 s in build.
 
 ## Earlier measurements (first, check-only version)
 
