@@ -43,7 +43,7 @@ their timing tables are superseded by the current ones.
     so they check that the patches change nothing else. They don't
     exercise early metadata itself.
   - rustc's UI suite: 22129 passed, 0 failed, 259 ignored, on Linux.
-  - cargo's test suite: 4035 passed. The single failure,
+  - cargo's test suite: 4034 passed. The single failure,
     `aaa_trigger_cross_compile_disabled_check`, only flags that there's no
     cross-compilation target installed.
 - **Errors.** `scripts/check-errors.sh` runs three scenarios on
