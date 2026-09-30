@@ -14,7 +14,7 @@
 # modes.
 set -uo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"
-runs=5 jobs=$(sysctl -n hw.ncpu 2>/dev/null || nproc) out=$root/results/$(date +%F) command=check
+runs=5 jobs=$(sysctl -n hw.ncpu 2>/dev/null || nproc) out= command=check
 while getopts n:j:o:c: opt; do
   case $opt in
     n) runs=$OPTARG ;; j) jobs=$OPTARG ;; o) out=$OPTARG ;; c) command=$OPTARG ;;
@@ -22,6 +22,9 @@ while getopts n:j:o:c: opt; do
   esac
 done
 shift $((OPTIND - 1))
+# A new directory per run by default: an existing runs.tsv is appended to,
+# and its medians cover every row.
+out=${out:-$root/results/$(date +%F-%H%M%S)-$command}
 [ $# -gt 0 ] || { echo "usage: $0 [-n runs] [-j jobs] [-c check|build] [-o out-dir] <project dir>[::cargo args]..." >&2; exit 2; }
 
 export RUSTC=$root/rustc/build/host/stage1/bin/rustc

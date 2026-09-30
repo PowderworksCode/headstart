@@ -14,6 +14,7 @@ while getopts n: opt; do
   case $opt in n) runs=$OPTARG ;; *) exit 2 ;; esac
 done
 shift $((OPTIND - 1))
+[ $# -eq 3 ] || { echo "usage: $0 [-n runs] <project dir> <file> <fn signature prefix>" >&2; exit 2; }
 dir=$(cd "$1" && pwd) file=$2 fn=$3
 export RUSTC=$root/rustc/build/host/stage1/bin/rustc RUSTC_WRAPPER= CARGO_INCREMENTAL=1
 cargo=$root/cargo/target/release/cargo
@@ -26,7 +27,9 @@ check() { # <mode>
 check 0; check 1 # warm both target dirs
 for run in $(seq "$runs"); do
   # A body-only edit: a new statement at the start of the function.
-  perl -0pi -e "s/(\Q$fn\E[^{]*\{)/\$1 let _headstart_edit = $run;/" "$dir/$file"
+  before=$(cksum < "$dir/$file")
+  FN=$fn RUN=$run perl -0pi -e 's/(\Q$ENV{FN}\E[^{]*\{)/$1 let _headstart_edit = $ENV{RUN};/' "$dir/$file"
+  [ "$(cksum < "$dir/$file")" != "$before" ] || { echo "no function starting with '$fn' in $file" >&2; exit 1; }
   for mode in 0 1; do
     start=$(now); check $mode; status=$?
     printf '%s\t%s\t%s\t%.2f\t%s\n' "$(basename "$dir"):$file" "$([ $mode = 1 ] && echo on || echo off)" "$run" "$(perl -e "print $(now) - $start")" "$status"

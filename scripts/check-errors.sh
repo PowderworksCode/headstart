@@ -3,8 +3,10 @@
 # scenario in tests/errors (clean, an error in a dependency's body, an error
 # in the binary), `cargo check` and `cargo build` must print the same
 # diagnostics, the same JSON messages and exit the same with headstart off
-# and on, and a built binary must print the same. Only the `Checking` /
-# `Compiling` progress lines may differ, since dependents start earlier.
+# and on, and a built binary must print the same. Output that already
+# depends on timing is ignored: progress lines (`Checking`, `Compiling`,
+# `Finished`), "waiting for other jobs", lock waits (`Blocking`), and the
+# order of JSON messages across crates.
 set -uo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"
 export RUSTC=$root/rustc/build/host/stage1/bin/rustc RUSTC_WRAPPER=

@@ -59,7 +59,7 @@ index 4bf69f6..5bb5e02 100644
 +    *ON
 +}
 diff --git a/src/compiler/job_queue/job_state.rs b/src/compiler/job_queue/job_state.rs
-index b866821..5f8cd09 100644
+index b866821..e4f2649 100644
 --- a/src/compiler/job_queue/job_state.rs
 +++ b/src/compiler/job_queue/job_state.rs
 @@ -50,6 +50,9 @@ pub struct JobState<'a, 'gctx> {
@@ -98,10 +98,10 @@ index b866821..5f8cd09 100644
          }
          Ok(())
      }
-@@ -147,9 +151,25 @@ impl<'a, 'gctx> JobState<'a, 'gctx> {
-     /// A method used to signal to the coordinator thread that the rmeta file
-     /// for an rlib has been produced. This is only called for some rmeta
-     /// builds when required, and can be called at any time before a job ends.
+@@ -144,12 +148,29 @@ impl<'a, 'gctx> JobState<'a, 'gctx> {
+         });
+     }
+ 
 +    /// Headstart: rustc paused, waiting for a dependency's full metadata or
 +    /// rlib.
 +    pub fn paused(&self) {
@@ -113,8 +113,14 @@ index b866821..5f8cd09 100644
 +        self.messages.push(Message::Resumed(self.id));
 +    }
 +
-     /// This should only be called once because a metadata file can only be
-     /// produced once!
+     /// A method used to signal to the coordinator thread that the rmeta file
+     /// for an rlib has been produced. This is only called for some rmeta
+     /// builds when required, and can be called at any time before a job ends.
+-    /// This should only be called once because a metadata file can only be
+-    /// produced once!
++    ///
++    /// Only the first call has an effect. With headstart, rustc announces
++    /// early metadata and then full metadata, and both call this.
      pub fn rmeta_produced(&self) {
 +        // With headstart, rustc announces early and then full metadata;
 +        // dependents are released on the first.
@@ -587,7 +593,7 @@ index a581e11..1b7b30b 100644
              // don't fail compilation.
              if unit.is_local() {
 diff --git a/src/compiler/mod.rs b/src/compiler/mod.rs
-index fae7bab..b7beb03 100644
+index fae7bab..838c33c 100644
 --- a/src/compiler/mod.rs
 +++ b/src/compiler/mod.rs
 @@ -395,6 +395,8 @@ fn rustc(
@@ -646,7 +652,7 @@ index fae7bab..b7beb03 100644
      if unit.mode.is_check() {
          cmd.arg("--emit=dep-info,metadata");
      } else if !build_runner
-@@ -2359,13 +2387,34 @@ fn on_stderr_line_inner(
+@@ -2359,13 +2387,35 @@ fn on_stderr_line_inner(
      struct ArtifactNotification<'a> {
          #[serde(borrow)]
          artifact: Cow<'a, str>,
@@ -666,8 +672,9 @@ index fae7bab..b7beb03 100644
 +                debug!("early metadata written");
 +                state.rmeta_produced();
 +            }
-+            // Headstart: rustc paused before code generation, waiting for a
-+            // dependency's full metadata, with its jobserver token handed back.
++            // Headstart: rustc paused before code generation or linking,
++            // waiting for a dependency's full metadata or rlib. It doesn't
++            // hold a job slot meanwhile.
 +            Some("wait-metadata") => {
 +                debug!("waiting for `{}`", artifact.artifact);
 +                state.paused();

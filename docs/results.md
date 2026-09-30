@@ -1,29 +1,49 @@
 # Results
 
-The rustc-perf benchmarks are in
-`rustc/src/tools/rustc-perf/collector/compile-benchmarks`. All numbers
-come from clean builds of them, taken with `scripts/bench.sh`. Each run
-alternates headstart off and on, using the same patched rustc and cargo.
-With headstart off, both behave like upstream. Tables give medians.
+Timings come from clean builds taken with `scripts/bench.sh`, of the
+rustc-perf benchmarks (in
+`rustc/src/tools/rustc-perf/collector/compile-benchmarks`) and of 13 real
+projects (`scripts/real-projects.sh`). Each run alternates headstart off
+and on, using the same patched rustc and cargo. With headstart off, both
+behave like upstream. Tables give medians. Memory and incremental
+numbers come from `scripts/bench-mem.sh` and
+`scripts/bench-incremental.sh`.
 
 The first sections cover the current version: early metadata as a
-separate file, used by both `cargo check` and `cargo build`. The later
-sections are measurements of the first, check-only version. They're kept
-for the error-delay, memory and incremental numbers, which the current
-version doesn't change for `cargo check`.
+separate file, used by both `cargo check` and `cargo build`, on the
+rustc-perf benchmarks and on 13 real projects (rust-analyzer, zed, bevy,
+lemmy and others). The later sections are measurements of the first,
+check-only version. They're kept for the error-delay, memory, clippy,
+rustdoc and incremental numbers, which haven't been measured again since;
+their timing tables are superseded by the current ones.
 
 ## Correctness (current version)
 
-- **Benchmark sweeps.** All 53 multi-file benchmarks were built with
-  headstart off and on, on Linux with 16 jobs, once with `cargo build`
-  and once with `cargo check`. In both, 52 pass in both modes with
-  identical diagnostics. stm32f4 fails in both modes because it needs a
-  device feature; its build-script panic messages differ only in the
-  thread ID.
+- **Benchmark sweeps** (`scripts/sweep.sh`).
+  - **What they build:** all 53 compile benchmarks (not counting the
+    `-new-solver`, `-nll`, `-tiny` and `-threads4` variants of others;
+    about 20 are a single crate, which headstart can't help but mustn't
+    break), with headstart
+    off and on, on Linux with 16 jobs, with `-Zearly-metadata-verify`.
+  - **Six sweeps:** `cargo check` and `cargo build`, each in debug, in
+    release (`-r`), and in debug with `-Zthreads=8` (`-t`).
+  - **Result:** in every sweep, 52 benchmarks pass in both modes with
+    identical diagnostics, and verify reports nothing.
+  - stm32f4 fails in both modes because it needs a device feature; its
+    build-script panic messages differ only in the thread ID.
+- **Real projects.** 13 projects, 312 builds, all succeeded with
+  identical diagnostics. The one exception is noise from the parallel
+  front end itself (see "Real projects").
+- **`scripts/check-swap.sh`** makes a library start on its dependency's
+  early metadata and swap in the full metadata while paused. At
+  opt-levels 0, 1, 2, 3 and s, the program built from it prints the same
+  as one built from full metadata.
 - **Test suites.**
-  - rustc's UI suite passes with the patch applied: 22129 passed,
-    0 failed, on Linux.
-  - cargo's test suite passes: 4034 passed. The single failure,
+  - Both run with the patches applied and headstart off, their default,
+    so they check that the patches change nothing else. They don't
+    exercise early metadata itself.
+  - rustc's UI suite: 22129 passed, 0 failed, 259 ignored, on Linux.
+  - cargo's test suite: 4035 passed. The single failure,
     `aaa_trigger_cross_compile_disabled_check`, only flags that there's no
     cross-compilation target installed.
 - **Errors.** `scripts/check-errors.sh` runs three scenarios on
@@ -31,8 +51,9 @@ version doesn't change for `cargo check`.
   error in the binary. It runs each with `cargo check` and `cargo build`,
   in human and JSON formats, with headstart off and on. Diagnostics and
   exit status are identical, and so is what the built binary prints.
-  Three things can differ:
-  - progress lines (`Checking`, `Compiling`, "waiting for other jobs");
+  What can differ is output that already depends on timing:
+  - progress lines (`Checking`, `Compiling`, `Finished`, "waiting for
+    other jobs");
   - the order of JSON messages across crates, which cargo doesn't
     guarantee, and headstart holds a crate's messages until its
     dependencies finish;
@@ -54,6 +75,14 @@ The sweeps found two bugs in the swap to full metadata, both fixed:
   so a full file next to early metadata is never an older one.
 
 ## Timing, current version: Linux, AMD EPYC 9554P, 16 jobs, 5 runs
+
+These were measured before the three fixes under "Bugs found by the real
+projects". Two of them apply only with optimization or `-Zthreads`. The
+third skips work in `cargo check` that was never read, so it can only
+make the check column faster; it wasn't re-timed.
+
+The 21 are a fixed set of multi-crate benchmarks, kept the same across
+rounds so that versions compare. All 53 benchmarks are in the sweeps.
 
 Build and check were measured back to back in one session, alternating
 headstart off and on. Another user's two long-running compilations kept
@@ -109,51 +138,184 @@ an idle VM (commit 0a09236). Since then:
 
 ## With the parallel front end, current version (`RUSTFLAGS=-Zthreads=8`)
 
-The same 21 benchmarks and session, straight after the table above,
-with `-Zthreads=8` on both sides. The load average rose to about 9 by the
-end of the check runs.
+The same 21 benchmarks, with `-Zthreads=8` on both sides, 5 runs each,
+after the fixes described under "Bugs found by the real projects". The
+load average was about 5 when each part started.
 
 | project | build today | build headstart | saved | check today | check headstart | saved |
 |---|--:|--:|--:|--:|--:|--:|
-| unicode-normalization-0.1.24 | 1.25 s | 1.01 s | 19% | 1.21 s | 0.89 s | 26% |
-| clap_derive-4.5.32 | 3.67 s | 2.73 s | 26% | 2.62 s | 2.09 s | 20% |
-| ripgrep-14.1.1 | 8.01 s | 6.51 s | 19% | 4.28 s | 3.42 s | 20% |
-| projection-caching | 5.10 s | 4.28 s | 16% | 4.86 s | 3.91 s | 20% |
-| hyper-1.6.0 | 1.30 s | 1.13 s | 13% | 1.18 s | 0.97 s | 18% |
-| html5ever | 8.27 s | 6.74 s | 19% | 7.95 s | 6.77 s | 15% |
-| serde_derive-1.0.219 | 4.19 s | 3.47 s | 17% | 2.53 s | 2.17 s | 14% |
-| tt-muncher | 1.88 s | 1.55 s | 18% | 1.49 s | 1.29 s | 13% |
-| piston-image | 4.27 s | 3.98 s | 7% | 2.93 s | 2.58 s | 12% |
-| html5ever-0.31.0 | 4.01 s | 3.64 s | 9% | 3.82 s | 3.44 s | 10% |
-| cargo | 18.48 s | 16.23 s | 12% | 13.93 s | 12.75 s | 8% |
-| nalgebra-0.33.0 | 8.30 s | 7.56 s | 9% | 7.87 s | 7.22 s | 8% |
-| image-0.25.6 | 14.15 s | 13.36 s | 6% | 9.18 s | 8.54 s | 7% |
-| diesel-2.2.10 | 14.35 s | 13.37 s | 7% | 14.34 s | 13.35 s | 7% |
-| wg-grammar | 5.84 s | 5.23 s | 10% | 5.65 s | 5.23 s | 7% |
-| syn-2.0.101 | 2.36 s | 2.21 s | 6% | 1.73 s | 1.63 s | 6% |
-| cranelift-codegen-0.119.0 | 13.96 s | 13.81 s | 1% | 10.03 s | 9.66 s | 4% |
-| cargo-0.87.1 | 54.76 s | 52.56 s | 4% | 30.48 s | 29.47 s | 3% |
-| eza-0.21.2 | 18.05 s | 16.92 s | 6% | 14.64 s | 14.34 s | 2% |
-| encoding | 0.95 s | 0.96 s | −1% | 0.79 s | 0.78 s | 1% |
-| regex-automata-0.4.8 | 3.69 s | 3.76 s | −2% | 2.43 s | 2.59 s | −7% |
+| unicode-normalization-0.1.24 | 1.27 s | 0.96 s | 24% | 1.15 s | 0.78 s | 32% |
+| ripgrep-14.1.1 | 8.83 s | 7.10 s | 20% | 4.63 s | 3.45 s | 25% |
+| clap_derive-4.5.32 | 3.88 s | 2.86 s | 26% | 2.70 s | 2.08 s | 23% |
+| projection-caching | 5.32 s | 4.35 s | 18% | 5.31 s | 4.11 s | 23% |
+| hyper-1.6.0 | 1.38 s | 1.18 s | 14% | 1.23 s | 0.98 s | 20% |
+| html5ever | 8.67 s | 7.04 s | 19% | 8.57 s | 7.15 s | 17% |
+| encoding | 0.94 s | 0.94 s | 0% | 0.83 s | 0.70 s | 16% |
+| serde_derive-1.0.219 | 4.28 s | 3.59 s | 16% | 2.62 s | 2.20 s | 16% |
+| image-0.25.6 | 15.61 s | 14.26 s | 9% | 9.90 s | 8.37 s | 15% |
+| nalgebra-0.33.0 | 8.64 s | 7.59 s | 12% | 8.15 s | 7.13 s | 13% |
+| tt-muncher | 1.85 s | 1.56 s | 16% | 1.44 s | 1.29 s | 10% |
+| wg-grammar | 5.82 s | 5.24 s | 10% | 5.83 s | 5.26 s | 10% |
+| cargo | 19.39 s | 16.89 s | 13% | 14.11 s | 12.81 s | 9% |
+| syn-2.0.101 | 2.41 s | 2.29 s | 5% | 1.76 s | 1.61 s | 9% |
+| html5ever-0.31.0 | 4.38 s | 3.93 s | 10% | 4.16 s | 3.83 s | 8% |
+| piston-image | 4.54 s | 4.14 s | 9% | 3.20 s | 2.93 s | 8% |
+| diesel-2.2.10 | 14.77 s | 13.80 s | 7% | 14.97 s | 13.93 s | 7% |
+| regex-automata-0.4.8 | 4.00 s | 3.68 s | 8% | 2.58 s | 2.41 s | 7% |
+| eza-0.21.2 | 19.43 s | 18.67 s | 4% | 16.20 s | 15.22 s | 6% |
+| cranelift-codegen-0.119.0 | 15.03 s | 14.70 s | 2% | 10.30 s | 10.01 s | 3% |
+| cargo-0.87.1 | 57.00 s | 54.50 s | 4% | 33.04 s | 32.86 s | 1% |
 
-- The two stack: headstart still saves 13–26% on chain-shaped builds (ripgrep, clap_derive, html5ever, hyper),
-  and a few percent on the large ones, where the parallel front end
-  already fills the cores.
-- **regex-automata is slower,** in every check run (2.42–2.47 s off,
-  2.56–2.76 s on) and slightly in build. It was 4% slower in the earlier
-  measurement too. With its analysis already spread over threads,
-  little is left to overlap, and the early write costs something.
-- cargo-0.87.1 was faster with headstart in all 5 runs of each, by
-  0.2–1.6 s in check and 1.6–3.5 s in build.
+- **Nothing is slower.** Headstart saves 14–32% on chain-shaped builds
+  (ripgrep, clap_derive, unicode-normalization, projection-caching,
+  hyper), and a few percent on the large ones, where the parallel front
+  end already fills the cores.
+- **regex-automata** was slower in every earlier measurement with
+  `-Zthreads` (up to 7%); it's 7–8% faster now. Like zola, it has large static tables that were evaluated
+  on one thread before the early write.
+- **encoding's** 16% in check is 0.13 s on a sub-second build.
+
+## Real projects: Linux, AMD EPYC 9554P, 16 jobs, 3 runs
+
+Thirteen open-source projects, cloned at the commits listed in
+`scripts/real-projects.sh`, which reproduces this set:
+
+```sh
+scripts/bench.sh -n 3 -c check $(scripts/real-projects.sh ~/hs-real)
+```
+
+- **Notoriously slow builds:** rust-analyzer, bevy, nushell, wasmtime,
+  typst, helix, polars, zed.
+- **Web apps and services:** lemmy (actix, diesel/postgres), vaultwarden
+  (rocket, diesel/sqlite), atuin (axum, sqlx), zola, lldap.
+- **Setup:** all with the default dev profile, from clean.
+  - Several projects pin a toolchain in `rust-toolchain.toml`. Every
+    build here uses the patched rustc, so the pins don't apply.
+  - meilisearch was dropped: its current code doesn't compile with
+    this rustc, with or without headstart.
+- **Load:** another user's jobs kept the VM's load average at 3–5
+  before each pass started. Off and on runs alternate, so both share it.
+- **Result:** all 312 builds succeeded, with identical diagnostics in both
+  modes, except lemmy under `-Zthreads` (below).
+
+| project | check today | check headstart | saved | build today | build headstart | saved |
+|---|--:|--:|--:|--:|--:|--:|
+| rust-analyzer | 90.1 s | 41.5 s | 54% | 137.9 s | 79.9 s | 42% |
+| polars | 172.4 s | 87.4 s | 49% | 341.2 s | 241.4 s | 29% |
+| wasmtime | 150.5 s | 79.9 s | 47% | 244.6 s | 155.8 s | 36% |
+| helix | 44.2 s | 30.5 s | 31% | 78.0 s | 64.4 s | 17% |
+| bevy | 120.9 s | 85.3 s | 29% | 195.8 s | 136.9 s | 30% |
+| zed | 280.0 s | 204.3 s | 27% | 425.1 s | 318.2 s | 25% |
+| lemmy | 448.8 s | 330.8 s | 26% | 532.3 s | 371.6 s | 30% |
+| typst | 86.0 s | 63.2 s | 26% | 142.2 s | 123.4 s | 13% |
+| lldap | 69.0 s | 56.6 s | 18% | 100.8 s | 77.5 s | 23% |
+| atuin | 125.2 s | 109.3 s | 13% | 162.6 s | 127.0 s | 22% |
+| vaultwarden | 116.4 s | 107.1 s | 8% | 164.7 s | 150.4 s | 9% |
+| nushell | 81.0 s | 75.5 s | 7% | 122.1 s | 112.2 s | 8% |
+| zola | 117.2 s | 114.7 s | 2% | 126.1 s | 125.9 s | 0% |
+
+- **Deep workspaces gain most.** rust-analyzer, polars and wasmtime chain
+  their own crates one after another. rust-analyzer and polars average
+  about 3 compilations running at once out of 16 without headstart, and
+  6–7 with it.
+- **Wide builds that end in one big crate gain least.** Out of 16 job
+  slots, zola, vaultwarden and atuin average 5–7 compilations running.
+  Their builds end with one crate compiling alone:
+  - zola: `minify_html_common`, 81 s of generated tables;
+  - vaultwarden: diesel, then the `vaultwarden` binary;
+  - atuin: sqlx and its own crates, after SQLite's C build.
+
+  Headstart can start a crate earlier, but it can't split one.
+- zed and lemmy, the two slowest, save 1.3 and 2 minutes on check, and
+  1.8 and 2.7 minutes on build.
+
+### With the parallel front end (`-Zthreads=8`)
+
+The same projects, with `RUSTFLAGS=-Zthreads=8` on both sides.
+
+| project | check today | check headstart | saved | build today | build headstart | saved |
+|---|--:|--:|--:|--:|--:|--:|
+| rust-analyzer | 40.1 s | 30.2 s | 25% | 70.1 s | 54.3 s | 22% |
+| typst | 63.4 s | 49.6 s | 22% | 133.6 s | 131.3 s | 2% |
+| wasmtime | 114.7 s | 99.2 s | 14% | 136.4 s | 118.6 s | 13% |
+| lemmy | 194.9 s | 168.8 s | 13% | 244.3 s | 210.3 s | 14% |
+| polars | 87.8 s | 76.7 s | 13% | 194.4 s | 176.7 s | 9% |
+| zed | 234.3 s | 221.2 s | 6% | 362.8 s | 329.0 s | 9% |
+| nushell | 69.4 s | 65.7 s | 5% | 107.6 s | 108.3 s | −1% |
+| bevy | 78.3 s | 75.4 s | 4% | 127.3 s | 118.1 s | 7% |
+| helix | 26.9 s | 26.0 s | 3% | 53.0 s | 45.9 s | 13% |
+| vaultwarden | 65.3 s | 63.3 s | 3% | 101.1 s | 97.2 s | 4% |
+| lldap | 51.5 s | 50.5 s | 2% | 78.6 s | 74.9 s | 5% |
+| atuin | 109.9 s | 110.5 s | −1% | 136.1 s | 128.7 s | 5% |
+| zola | 73.1 s | 74.6 s | −2% | 84.3 s | 80.9 s | 4% |
+
+- **The two overlap.** The parallel front end alone does much of what
+  headstart does: rust-analyzer's check goes from 90 s to 40–42 s with
+  either one, and to 30 s with both.
+- **On top of `-Zthreads`,** headstart adds up to 25%, mostly on deep
+  workspaces.
+- **Three results are within noise of even:** atuin and zola in check
+  (−1%, −2%), and nushell in build (−1%). Their run ranges overlap.
+- **wasmtime's check runs were noisy** (79–135 s off, 75–111 s on)
+  while the VM's other load came and went.
+- **lemmy's diagnostics differ between modes, but not because of
+  headstart.**
+  - The parallel front end reports some "overflow evaluating the
+    requirement" warnings at different lines from run to run, with or
+    without headstart.
+  - Those warnings are the only difference.
+  - With the default front end, all runs are identical.
+
+A first version of this pass found zola 80% *slower* with headstart. See
+"Bugs found by the real projects" below.
+
+### Bugs found by the real projects
+
+Until this round, the rustc-perf sweeps built everything in debug mode
+with the default front end. The real projects, and a release sweep
+added because of them, went down three paths those sweeps never did.
+All three are fixed, and each is now covered by a sweep or a test.
+
+1. **Optimized dependencies: "missing optimized MIR".**
+   - **Seen in:** typst builds its dependencies at opt-level 2, and zed
+     builds its proc macros at 3. Both failed with headstart on.
+   - **Cause:** writing early metadata computed deduced parameter
+     attributes, which optimizes every function body. The MIR inliner then
+     asked dependencies still loaded from early metadata whether they had
+     MIR. They said no, and the answer stayed cached after the swap.
+   - **Fix:** early metadata no longer records deduced parameter
+     attributes, and records optimized MIR only for coroutines.
+     `scripts/check-swap.sh` reproduces the bug at opt-level 2 and 3
+     without the fix.
+2. **Statics evaluated on one thread.**
+   - **Seen in:** zola under `-Zthreads=8`, 80% slower with headstart.
+     The crate at the end of its build (`minify_html_common`, large
+     generated tables) took 78 s to reach its early write, against 26 s
+     for all of its analysis with `-Zthreads` alone.
+   - **Cause:** the step before the early write evaluated statics in a
+     sequential loop, where body checking uses a parallel one.
+   - **Fix:** that loop is parallel now, and consts' MIR is prefetched in
+     parallel for early metadata, as for full metadata. This also turned
+     small losses on bevy, helix and lldap into gains, and moved typst
+     from 4% to 22%.
+3. **`cargo check --release` asked early crates for MIR.**
+   - **Seen in:** the release sweep, where `-Zearly-metadata-verify`
+     reported 2,819 cases.
+   - **Cause:** in a check build, a crate's full metadata still computed
+     the reachable set. At opt-level ≥ 1 that optimizes MIR, asking
+     dependencies that check builds never swap to full.
+   - **Harm:** the result is never read without code generation, so no
+     build failed; the work was wasted and the answers wrong.
+   - **Fix:** it's skipped there now.
+
 
 ## Earlier measurements (first, check-only version)
 
 ### Correctness
 
-**macOS (M2 Max).** A sweep over all 53 multi-file benchmarks (the
-rustc-perf directories with a `Cargo.toml`, minus solver and `-nll`
-variants) built each one with headstart off and on:
+**macOS (M2 Max).** A sweep over all 53 compile benchmarks (not counting
+the `-new-solver`, `-nll`, `-tiny` and `-threads4` variants) built each
+one with headstart off and on:
 
 - **No ICEs**, and every benchmark's exit status matched between modes.
   Three benchmarks fail in both modes, for reasons unrelated to headstart:
@@ -234,8 +396,11 @@ It found two bugs:
 
 ### Clippy and rustdoc
 
-Both read check-mode metadata, so both read early metadata with headstart
-on.
+Measured on the first, check-only version. Clippy runs as check units,
+so it reads early metadata with headstart on. rustdoc units start only
+once their dependencies have finished, so they read full metadata; the
+comparison checks that the check units underneath produce the same
+docs.
 
 - **Clippy.** `cargo check` with `clippy-driver` as the workspace
   wrapper, which is what `cargo clippy` does, over all 49 benchmarks that
@@ -277,8 +442,8 @@ that write early metadata, that write takes:
 That's 5.2 s in total, against 2.3 s for the same crates' metadata today,
 which is written at the end. The difference is work the metadata needs
 from bodies (constants, opaque types, async functions), done earlier
-rather than added. The first version of the patch also computed the
-reachable set, which walks every inline and generic body. That took the
+rather than added. An earlier revision of this version also computed
+the reachable set, which walks every inline and generic body. That took the
 total to 18.8 s, with a median of 23 ms and a maximum of 1.6 s.
 
 The error at the start of `slow`, in `tests/errors`, is printed at 0.17 s
@@ -294,8 +459,8 @@ has no cross-compilation target installed.
 ### Timing: Linux, AMD EPYC 9554P, 16 jobs, 5 runs
 
 These runs started once the VM was idle (load average 0.57). They use
-the current patches, which include two fixes that made an earlier Linux
-run understate headstart:
+that version's final patches, which include two fixes that made an
+earlier Linux run understate headstart:
 
 - **Binaries waited for their whole dependency tree.** Cargo made a
   check-mode binary wait for the full check of every transitive
@@ -355,8 +520,8 @@ of 3:
   in memory together.
 - **nalgebra is the outlier:** 0.29 GB more, because its large crates now
   overlap.
-- **The final patches don't cost speed.** The times, measured on those
-  patches, match the timing table above: the interface-body rule and the
+- **That version's final patches didn't cost speed.** The times,
+  measured on those patches, match the timing table above: the interface-body rule and the
   incremental fixes didn't change it.
 
 ### With the parallel front end (`-Zthreads=8`)
@@ -382,12 +547,12 @@ is a clean `cargo check`, median of 3, with the min–max in brackets:
 | hyper-1.6.0 | 2.48 s (2.47–2.60) | 1.83 s (1.81–1.85) | 1.07 s (1.03–1.07) | 0.87 s (0.86–0.96) |
 
 - **The parallel front end alone is the bigger win everywhere:** 42–64%
-  faster than plain, where headstart alone is 20–45%.
+  faster than plain, where headstart alone is 19–45%.
 - **On top of it, headstart helps chain-shaped builds most:** ripgrep
   saves 0.92 s (22%), hyper 0.20 s (19%) and serde_derive 0.43 s (17%).
   The large builds gain a little: cargo-0.87.1 1.44 s (5%), image 0.27 s
-  (3%), eza 0.33 s (2%). These ranges don't overlap the `-Zthreads=8`
-  ones.
+  (3%), eza 0.33 s (2%). Only cargo-0.87.1's run ranges don't overlap
+  the `-Zthreads=8` ones.
 - **regex-automata gets 0.09 s (4%) slower** with both, likely the early
   write's cost where the parallel front end has already removed the wait.
 - An earlier, separate 3-run session showed cargo-0.87.1 3% slower with
@@ -450,7 +615,7 @@ with headstart on.
 - **CPU-bound builds.** cargo-0.87.1 has about 211 s of rustc work. On
   the 12-core Mac, the cores are busy almost until the last crate starts,
   and the first version of headstart saved 1%. On 16 cores the current
-  version saves 21%. Starting crates earlier helps only when there's an
+  version saves 19% for check and 13% for build. Starting crates earlier helps only when there's an
   idle core to run them on.
 - **Build scripts and proc macros.** Build scripts, and C code compiled
   from them, are full builds and gain nothing. The same holds for proc

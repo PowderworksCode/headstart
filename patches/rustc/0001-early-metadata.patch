@@ -1,16 +1,34 @@
 diff --git a/compiler/rustc_driver_impl/src/lib.rs b/compiler/rustc_driver_impl/src/lib.rs
-index 210f04a11..ec8ce9002 100644
+index 210f04a11..51330df4e 100644
 --- a/compiler/rustc_driver_impl/src/lib.rs
 +++ b/compiler/rustc_driver_impl/src/lib.rs
 @@ -313,6 +313,8 @@ pub fn run_compiler(at_args: &[String], callbacks: &mut (dyn Callbacks + Send))
                  return None;
              }
  
-+            let _early_metadata = passes::write_early_metadata(tcx);
++            let early_metadata = passes::write_early_metadata(tcx);
 +
              tcx.ensure_ok().analysis(());
  
              if callbacks.after_analysis(compiler, tcx) == Compilation::Stop {
+@@ -333,12 +335,15 @@ pub fn run_compiler(at_args: &[String], callbacks: &mut (dyn Callbacks + Send))
+ 
+             tcx.report_unused_features();
+ 
+-            Some(linker)
++            Some((linker, early_metadata.into_path()))
+         });
+ 
+         // Linking is done outside the `compiler.enter()` so that the
+         // `GlobalCtxt` within `Queries` can be freed as early as possible.
+-        if let (Some(linker), incr_comp_session) = linker {
++        if let (Some((linker, early_metadata)), incr_comp_session) = linker {
++            // Linking finishes code generation; if it fails, withdraw the
++            // early metadata too.
++            let _early_metadata = passes::EarlyMetadata::new(sess, early_metadata);
+             linker.link(sess, incr_comp_session, codegen_backend);
+         }
+     })
 diff --git a/compiler/rustc_hir_analysis/src/lib.rs b/compiler/rustc_hir_analysis/src/lib.rs
 index dbbf06818..7a54d9683 100644
 --- a/compiler/rustc_hir_analysis/src/lib.rs
@@ -43,7 +61,7 @@ index dbbf06818..7a54d9683 100644
          let def_kind = tcx.def_kind(item_def_id);
          // Make sure we evaluate all static and (non-associated) const items, even if unused.
 diff --git a/compiler/rustc_interface/src/passes.rs b/compiler/rustc_interface/src/passes.rs
-index da0ebce5b..213ed178f 100644
+index da0ebce5b..621bab9f0 100644
 --- a/compiler/rustc_interface/src/passes.rs
 +++ b/compiler/rustc_interface/src/passes.rs
 @@ -892,6 +892,7 @@ pub fn write_interface<'tcx>(tcx: TyCtxt<'tcx>) {
@@ -85,7 +103,7 @@ index da0ebce5b..213ed178f 100644
      // Freeze definitions as we don't add new ones at this point.
      // We need to wait until now since we synthesize a by-move body
      // for all coroutine-closures.
-@@ -1281,6 +1291,64 @@ fn analysis(tcx: TyCtxt<'_>, (): ()) {
+@@ -1281,6 +1291,79 @@ fn analysis(tcx: TyCtxt<'_>, (): ()) {
      }
  }
  
@@ -97,6 +115,21 @@ index da0ebce5b..213ed178f 100644
 +pub struct EarlyMetadata<'a> {
 +    sess: &'a Session,
 +    path: Option<PathBuf>,
++}
++
++impl<'a> EarlyMetadata<'a> {
++    /// Guards the early metadata at `path`, if any, for the rest of `sess`'s
++    /// compilation: linking finishes code generation and writes the rlib
++    /// after the global context is gone.
++    pub fn new(sess: &'a Session, path: Option<PathBuf>) -> Self {
++        EarlyMetadata { sess, path }
++    }
++
++    /// Stops guarding the early metadata, and returns its path, to be
++    /// guarded again with [`EarlyMetadata::new`].
++    pub fn into_path(mut self) -> Option<PathBuf> {
++        self.path.take()
++    }
 +}
 +
 +impl Drop for EarlyMetadata<'_> {
@@ -118,7 +151,7 @@ index da0ebce5b..213ed178f 100644
 +/// withdrawn; see [`EarlyMetadata`].
 +pub fn write_early_metadata(tcx: TyCtxt<'_>) -> EarlyMetadata<'_> {
 +    let none = EarlyMetadata { sess: tcx.sess, path: None };
-+    // Crates nothing can depend on (binaries) write empty metadata.
++    // Crates nothing can depend on (binaries) write no early metadata.
 +    if !tcx.sess.opts.unstable_opts.early_metadata
 +        || !tcx.sess.opts.output_types.contains_key(&OutputType::Metadata)
 +        || !tcx.needs_metadata()
@@ -150,7 +183,7 @@ index da0ebce5b..213ed178f 100644
  /// Runs the codegen backend, after which the AST and analysis can
  /// be discarded.
  pub(crate) fn start_codegen<'tcx>(
-@@ -1311,6 +1379,23 @@ pub(crate) fn start_codegen<'tcx>(
+@@ -1311,6 +1394,23 @@ pub(crate) fn start_codegen<'tcx>(
  
      info!("Pre-codegen\n{:?}", tcx.debug_stats());
  
@@ -195,7 +228,7 @@ index 759297bc6..ae0153678 100644
          let _timing = sess.timings.section_guard(sess.dcx(), TimingSection::Linking);
          codegen_backend.link(
 diff --git a/compiler/rustc_metadata/src/creader.rs b/compiler/rustc_metadata/src/creader.rs
-index aea843ac0..a105d1a5f 100644
+index aea843ac0..b1eed4433 100644
 --- a/compiler/rustc_metadata/src/creader.rs
 +++ b/compiler/rustc_metadata/src/creader.rs
 @@ -1,7 +1,7 @@
@@ -221,7 +254,7 @@ index aea843ac0..a105d1a5f 100644
      }
  
      pub(crate) fn get_crate_data_mut(&mut self, cnum: CrateNum) -> &mut CrateMetadata {
-@@ -265,9 +270,63 @@ pub fn resolved_extern_crate(&self, externs_name: Symbol) -> Option<CrateNum> {
+@@ -265,9 +270,62 @@ pub fn resolved_extern_crate(&self, externs_name: Symbol) -> Option<CrateNum> {
      }
  
      pub(crate) fn iter_crate_data(&self) -> impl Iterator<Item = (CrateNum, &CrateMetadata)> {
@@ -234,8 +267,7 @@ index aea843ac0..a105d1a5f 100644
 +    /// `-Zearly-metadata`: loads the full metadata of every dependency loaded
 +    /// from early metadata. Code generation needs it: the MIR of generic and
 +    /// inline functions, exported symbols. Full metadata that isn't written
-+    /// yet is waited for, with this process's jobserver token handed back
-+    /// meanwhile (see [`wait_for_full_metadata`]).
++    /// yet is waited for (see [`wait_for_full_metadata`]).
 +    pub fn load_full_metadata(tcx: TyCtxt<'_>) {
 +        let cstore = CStore::from_tcx(tcx);
 +        let early: Vec<CrateNum> = cstore
@@ -286,7 +318,7 @@ index aea843ac0..a105d1a5f 100644
      }
  
      pub fn all_proc_macro_def_ids(&self, tcx: TyCtxt<'_>) -> impl Iterator<Item = DefId> {
-@@ -1425,3 +1484,81 @@ fn visit_item(&mut self, item: &'ast ast::Item) {
+@@ -1425,3 +1483,81 @@ fn visit_item(&mut self, item: &'ast ast::Item) {
      visit::walk_crate(&mut f, krate);
      f.spans
  }
@@ -448,7 +480,7 @@ index dd963fc87..a5065a32c 100644
 +    rendered_const,
 +};
 diff --git a/compiler/rustc_metadata/src/locator.rs b/compiler/rustc_metadata/src/locator.rs
-index 38da6561e..2c4417304 100644
+index 38da6561e..a5bc2c4e1 100644
 --- a/compiler/rustc_metadata/src/locator.rs
 +++ b/compiler/rustc_metadata/src/locator.rs
 @@ -237,6 +237,7 @@
@@ -501,11 +533,12 @@ index 38da6561e..2c4417304 100644
              if prefix == staticlib_prefix && suffix == staticlib_suffix {
                  should_check_staticlibs = false;
              }
-@@ -528,6 +543,22 @@ fn extract_lib(
+@@ -528,6 +543,23 @@ fn extract_lib(
          interfaces: FxIndexSet<PathBuf>,
      ) -> Result<Option<(Svh, Library)>, CrateError> {
          let mut slot = None;
-+        // Of a crate's early and full metadata, keep the newer.
++        // Of a crate's early and full metadata, prefer the full metadata if
++        // it exists: writing early metadata deletes any older full metadata.
 +        let rmetas = if self.accept_early_metadata {
 +            let early: Vec<PathBuf> =
 +                rmetas.iter().filter(|path| is_early_metadata(path)).cloned().collect();
@@ -524,7 +557,7 @@ index 38da6561e..2c4417304 100644
          // Order here matters, rmeta should come first.
          //
          // Make sure there's at most one rlib and at most one dylib.
-@@ -543,10 +574,38 @@ fn extract_lib(
+@@ -543,10 +575,38 @@ fn extract_lib(
              return Err(CrateError::FullMetadataNotFound(self.crate_name, CrateFlavor::SDylib));
          }
  
@@ -563,12 +596,12 @@ index 38da6561e..2c4417304 100644
      fn needs_crate_flavor(&self, flavor: CrateFlavor) -> bool {
          if flavor == CrateFlavor::Dylib && self.is_proc_macro {
              return true;
-@@ -752,6 +811,19 @@ fn find_commandline_library(
+@@ -752,6 +812,19 @@ fn find_commandline_library(
          let mut dylibs = FxIndexSet::default();
          let mut sdylib_interfaces = FxIndexSet::default();
          for loc in &self.exact_paths {
 +            // `--extern foo=libfoo.rmeta` also finds `libfoo.early-rmeta`, and
-+            // loads whichever is newer.
++            // loads the full metadata if it exists.
 +            let early_loc;
 +            let loc = if self.accept_early_metadata
 +                && loc.original().extension().is_some_and(|ext| ext == "rmeta")
@@ -583,7 +616,7 @@ index 38da6561e..2c4417304 100644
              let loc_canon = loc.canonicalized();
              let loc_orig = loc.original();
              if !loc_canon.exists() {
-@@ -774,7 +846,7 @@ fn find_commandline_library(
+@@ -774,7 +847,7 @@ fn find_commandline_library(
                      rlibs.insert(loc_canon.clone());
                      continue;
                  }
@@ -592,7 +625,7 @@ index 38da6561e..2c4417304 100644
                      rmetas.insert(loc_canon.clone());
                      continue;
                  }
-@@ -814,7 +886,7 @@ pub(crate) fn into_error(
+@@ -814,7 +887,7 @@ pub(crate) fn into_error(
      }
  }
  
@@ -601,7 +634,7 @@ index 38da6561e..2c4417304 100644
      target: &Target,
      flavor: CrateFlavor,
      filename: &'p Path,
-@@ -973,13 +1045,23 @@ fn get_flavor_from_path(path: &Path) -> CrateFlavor {
+@@ -973,13 +1046,23 @@ fn get_flavor_from_path(path: &Path) -> CrateFlavor {
  
      if filename.ends_with(".rlib") {
          CrateFlavor::Rlib
@@ -762,7 +795,7 @@ index 154cf4f06..04b6e3616 100644
  
      dylib_dependency_formats => { cdata.get_dylib_dependency_formats(tcx) }
 diff --git a/compiler/rustc_metadata/src/rmeta/encoder.rs b/compiler/rustc_metadata/src/rmeta/encoder.rs
-index afa5646be..aed1effc4 100644
+index afa5646be..8622dafd3 100644
 --- a/compiler/rustc_metadata/src/rmeta/encoder.rs
 +++ b/compiler/rustc_metadata/src/rmeta/encoder.rs
 @@ -10,7 +10,7 @@
@@ -833,7 +866,7 @@ index afa5646be..aed1effc4 100644
                  stable_crate_id: tcx.stable_crate_id(LOCAL_CRATE),
 -                required_panic_strategy: tcx.required_panic_strategy(LOCAL_CRATE),
 +                // Computing this scans every body's MIR. Only linking reads it,
-+                // and `-Zearly-metadata` is for builds that don't link.
++                // from full metadata.
 +                required_panic_strategy: if self.early {
 +                    None
 +                } else {
@@ -1441,8 +1474,8 @@ index afa5646be..aed1effc4 100644
 -                    record!(self.tables.mir_coroutine_witnesses[def_id.to_def_id()] <- witnesses);
 +    /// With `-Zearly-metadata`, function bodies aren't type-checked yet. If
 +    /// `def_id` is nested in one (a closure, an inline const, a const
-+    /// argument), returns that body's owner: `def_id` is encoded only once
-+    /// something else needed the body type-checked. Coroutines are encoded
++    /// argument), returns that body's owner: `def_id` is encoded only if that
++    /// body is one of [`Self::interface_bodies`]. Coroutines are encoded
 +    /// regardless: dependents read their witnesses to check `Send`.
 +    fn early_enclosing_body(&self, def_id: LocalDefId) -> Option<LocalDefId> {
 +        let tcx = self.tcx;
@@ -1851,10 +1884,10 @@ index 5cd7322ce..b76b88ca8 100644
          // Depend on the `analysis` query to ensure compilation if finished.
          self.ensure_ok().analysis(());
 diff --git a/compiler/rustc_session/src/options.rs b/compiler/rustc_session/src/options.rs
-index 0e0671301..336b6168c 100644
+index 0e0671301..93cfeb52a 100644
 --- a/compiler/rustc_session/src/options.rs
 +++ b/compiler/rustc_session/src/options.rs
-@@ -2492,6 +2492,12 @@ pub(crate) fn parse_rust_version(slot: &mut Option<RustcVersion>, v: Option<&str
+@@ -2492,6 +2492,13 @@ pub(crate) fn parse_rust_version(slot: &mut Option<RustcVersion>, v: Option<&str
      eagerly_emit_delayed_bugs: bool = (false, parse_bool, [UNTRACKED],
          "emit delayed bugs eagerly as errors instead of stashing them and emitting \
          them only if an error has not been emitted"),
@@ -1863,7 +1896,8 @@ index 0e0671301..336b6168c 100644
 +        bodies are, so dependent crates can start sooner (default: no)"),
 +    early_metadata_verify: bool = (false, parse_bool, [UNTRACKED],
 +        "with `-Zearly-metadata`, report bodies type-checked during the early write whose \
-+        nested definitions were left out of it (default: no)"),
++        nested definitions were left out of it, and queries only full metadata can answer \
++        asked of crates loaded from early metadata (default: no)"),
      ehcont_guard: bool = (false, parse_bool, [TRACKED],
          "generate Windows EHCont Guard tables"),
      embed_metadata: bool = (true, parse_bool, [TRACKED],

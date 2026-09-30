@@ -141,9 +141,11 @@ Everything else waits until after the write.
   its dependencies' full metadata, so its own full metadata skips the
   reachable set too. Upstream computes it there but never reads it, and
   at opt-level 1 or more computing it runs the MIR inliner.
-- **Exported symbols, the reachable set and the panic strategy.**
+- **Exported symbols, cross-crate inlinability and the panic strategy.**
   Computing them collects the crate's monomorphizations, or walks its
-  bodies. Only code generation and linking read them, from full metadata.
+  bodies. Early metadata doesn't compute the reachable set either, which
+  decides which MIR full metadata encodes. Only code generation and
+  linking read any of these, from full metadata.
 
 ### Consuming early metadata
 
@@ -185,8 +187,8 @@ generation instead.
 
 When rustc has to wait for a dependency's full metadata or rlib:
 
-1. It announces a `wait-metadata` artifact notification naming the file,
-   and polls for it.
+1. It announces a `wait-metadata` artifact notification naming the file
+   (the same kind for an rlib), and polls for it.
 2. The build tool stops counting it as running, so its job slot can go to
    other work.
 3. Once the file exists, rustc announces `resume` and continues. The
@@ -203,8 +205,9 @@ always running or queued, and waiting can't deadlock.
 
 **Retraction.** If a crate fails after writing early metadata, its
 promise is withdrawn: the early file is deleted. rustc does this when a
-compilation ends with errors or panics. A build tool can do it when the
-compiler crashes. A compilation waiting for that crate's full metadata or
+compilation ends with errors or panics, through linking, which is where
+code generation finishes and the rlib is written. A build tool has to
+do it when the compiler is killed or aborts. A compilation waiting for that crate's full metadata or
 rlib sees the early metadata disappear, and stops with an error. Its
 output is dropped anyway (below).
 
@@ -223,8 +226,8 @@ With the variable set:
     notification. Headstart extends that to every unit, and to
     `cargo check`.
   - A unit's dependents are released once, on whichever notification
-    comes first. Cargo now reads the notification's `emit` field instead
-    of guessing from the file extension.
+    comes first. Cargo reads the notification's `emit` field for the new
+    kinds, and still recognizes full metadata by its `.rmeta` extension.
 - **No waiting for the whole dependency tree.** Cargo normally makes a
   unit that links wait for the *full* build of every transitive
   dependency. Under headstart, rustc waits for the rlibs itself right
@@ -245,13 +248,13 @@ With the variable set:
   and unblocks its dependents.
 
   So a failing build prints the same diagnostics, JSON messages and exit
-  status as today. Two kinds of progress output can differ:
-  - the `Checking`/`Compiling` lines of dependents that started early;
-  - "waiting for other jobs to finish", which already depends on timing
-    today.
-
-  Held JSON messages can come out in a different order across crates,
-  which cargo doesn't guarantee anyway.
+  status as today. What can differ is output that already depends on
+  timing today:
+  - progress lines: `Checking`/`Compiling` for dependents that started
+    early, and `Finished`;
+  - "waiting for other jobs to finish" and lock waits (`Blocking`);
+  - the order of JSON messages across crates, which cargo doesn't
+    guarantee.
 
 With the variable unset, cargo behaves exactly as upstream.
 
@@ -259,26 +262,35 @@ With the variable unset, cargo behaves exactly as upstream.
 
 - **A crate's own errors surface a little later.** They're delayed by the
   early write: 4 ms for the median crate in cargo-0.87.1's build, and
-  249 ms at p99 (see [results.md](results.md)). This is the objection
-  that stopped the 2019 attempt ([rust-lang/rust#64112]); here the cost
-  is measured.
+  249 ms at p99 (see [results.md](results.md); measured before the
+  latest changes to what the early write computes). That was one of the
+  two reasons the 2019 attempt stopped ([rust-lang/rust#64112]). A
+  dependent also competes for CPU with the crate it started on, which
+  this figure doesn't capture.
 - **Wasted work on failure.** When a crate fails, its dependents' work so
   far is thrown away. The output is still the same as today.
 - **Incremental builds.** `-Zearly-metadata` is a tracked option, so
   toggling it starts a fresh incremental session. The crate hash covers
   every body (see above), so dependents' incremental results stay sound.
   `scripts/check-incremental.sh` runs a sequence of edits under `cargo
-  check` and `cargo build`. It checks that each step, and the final
-  state, matches a clean build.
+  check` and `cargo build`. It checks that each step matches the same
+  step with headstart off, and that the final state matches a clean
+  build.
 - **Platforms.** Retraction deletes a file that dependents may have
   memory-mapped. That's fine on Unix; on Windows, deleting an open file
   can fail, and that path hasn't been tested.
 - **Memory.** More compilers are alive at once, including paused ones,
-  so peak memory can rise (see [results.md](results.md#peak-memory)).
-  Cargo doesn't cap the number of paused compilers yet.
+  so peak memory can rise (see [results.md](results.md#peak-memory),
+  measured on the first, check-only version). Cargo doesn't cap the
+  number of paused compilers yet.
 - **The parallel front end.** `-Zthreads` uses the same idle cores. On
-  top of it, headstart saves much less on large builds (see
-  [results.md](results.md#with-the-parallel-front-end--zthreads8)).
+  top of it, headstart adds up to 25% on real projects, less on wide
+  ones, and within noise of nothing on a few (see
+  [results.md](results.md)).
+- **Contention.** A resumed compilation doesn't wait for a free job
+  slot, and headstart keeps more compilations running. On a saturated
+  machine that can slow the critical path. Cargo doesn't adjust its
+  scheduling for this yet.
 - **Coverage.** If the metadata needs something from a body that the
   encoder doesn't know to force, the failure would be a compiler crash
   (an ICE): a missing entry in a dependent, or a definition created after

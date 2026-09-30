@@ -4,8 +4,14 @@ the build's time goes along its critical path, plus two headstart-specific
 waits:
 
 - linking crates (binaries, proc macros): how long after their dependencies'
-  early metadata they started (cargo holds them until every rlib exists);
-- pauses: time dependents spent waiting for full metadata.
+  early metadata they started (queued for a job slot, or held by cargo);
+- pauses: time spent waiting for a dependency's full metadata or rlib,
+  split into waiting for the file and waiting after it was written.
+
+A pause runs from the first `wait-metadata` after a `resume` (rustc
+announces each file it waits for) to the next `resume`. The critical path
+treats a linking crate as waiting for every rlib it links, which it does
+before linking.
 
     scripts/critical-path.py <log>...
 """
@@ -28,9 +34,21 @@ def load(path):
                           "events": defaultdict(list)}
         elif key in units:
             units[key]["events"][kind].append(t)
-            if len(f) > 3:
-                units[key].setdefault("files", []).append((kind, t, f[3]))
+            units[key].setdefault("seq", []).append((kind, t, f[3] if len(f) > 3 else None))
     return units
+
+def pauses(u):
+    """(start, resume, files waited for) for each pause of a unit."""
+    out, start, files = [], None, []
+    for kind, t, f in u.get("seq", []):
+        if kind == "wait-metadata":
+            if start is None:
+                start, files = t, []
+            files.append(f)
+        elif kind == "resume" and start is not None:
+            out.append((start, t, files))
+            start = None
+    return out
 
 def first(u, kind):
     return u["events"][kind][0] if u["events"][kind] else None
@@ -44,8 +62,7 @@ def report(path):
         u["end"] = first(u, "end")
         u["early"] = first(u, "early-metadata")
         u["full"] = first(u, "metadata")
-        waits, resumes = u["events"]["wait-metadata"], u["events"]["resume"]
-        u["paused"] = sum(r - w for w, r in zip(waits, resumes))
+        u["paused"] = sum(r - s for s, r, _ in pauses(u))
     t0 = min(u["start"] for u in units.values())
     end = max(u["end"] for u in units.values() if u["end"])
     def dep_units(u):
@@ -90,26 +107,20 @@ def report(path):
             u = max(deps, key=lambda d: d["end"])
         else:
             u = max(deps, key=early_ready)
-    # Pauses: waiting for the awaited full metadata vs. for a job slot after it.
+    # Pauses: waiting for the awaited files vs. resuming after they were written.
     written = {}
     for u in units.values():
-        for kind, t, f in u.get("files", []):
-            if kind == "metadata":
+        for kind, t, f in u.get("seq", []):
+            if kind in ("metadata", "link") and f:
                 written[f] = t
-    waiting = starved = 0.0
+    waiting = after = 0.0
     for u in units.values():
-        files = u.get("files", [])
-        for i, (kind, t, f) in enumerate(files):
-            if kind != "wait-metadata":
-                continue
-            resume = next((t2 for k2, t2, _ in files[i + 1:] if k2 == "resume"), None)
-            if resume is None:
-                continue
-            ready = written.get(f, resume)
-            waiting += max(0.0, min(ready, resume) - t)
-            starved += max(0.0, resume - max(ready, t))
-    print(f"  paused: {waiting:.1f} s waiting for full metadata, "
-          f"{starved:.1f} s waiting for a job slot after it was written")
+        for start, resume, files in pauses(u):
+            ready = max(written.get(f, resume) for f in files)
+            waiting += max(0.0, min(ready, resume) - start)
+            after += max(0.0, resume - max(ready, start))
+    print(f"  paused: {waiting:.1f} s waiting for files, "
+          f"{after:.1f} s between the last one being written and resuming")
     print("  critical path (start, end, paused, crate):")
     for u in reversed(path_):
         print(f"    {u['start'] - t0:6.2f} {u['end'] - t0:6.2f} {u['paused']:5.2f}  "

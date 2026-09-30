@@ -43,7 +43,7 @@ EOF
 echo 'fn main() { println!("{}", mid::run()); }' > "$work/main.rs"
 
 status=0
-for opt in 0 1 2 3 s; do
+for opt in 0 1 2 3 s z; do
   out=$work/$opt
   mkdir -p "$out/hidden"
   common=(-Zearly-metadata -C opt-level=$opt --edition=2024 -L "dependency=$out")
