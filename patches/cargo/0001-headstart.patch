@@ -1,0 +1,693 @@
+diff --git a/src/compiler/build_runner/mod.rs b/src/compiler/build_runner/mod.rs
+index 4bf69f6..5bb5e02 100644
+--- a/src/compiler/build_runner/mod.rs
++++ b/src/compiler/build_runner/mod.rs
+@@ -763,6 +763,15 @@ impl<'a, 'gctx> BuildRunner<'a, 'gctx> {
+     /// Returns whether when `parent` depends on `dep` if it only requires the
+     /// metadata file from `dep`.
+     pub fn only_requires_rmeta(&self, parent: &Unit, dep: &Unit) -> bool {
++        // Headstart: a compile unit starts on its library dependencies' early
++        // metadata (`-Zearly-metadata`), written before their bodies are
++        // checked. Check units need nothing more. Units that generate code
++        // wait for full metadata before code generation, and units that link
++        // wait for the rlibs before linking; rustc does both. Dependencies
++        // that must be fully built (proc macros, dylibs) still are.
++        if headstart() && headstart_starts_early(parent, dep) {
++            return true;
++        }
+         // We're only a candidate for requiring an `rmeta` file if we
+         // ourselves are building an rlib,
+         !parent.requires_upstream_objects()
+@@ -773,6 +782,13 @@ impl<'a, 'gctx> BuildRunner<'a, 'gctx> {
+             && dep.mode == CompileMode::Build
+     }
+ 
++    /// Whether headstart is on (`CARGO_HEADSTART=1`): units are compiled with
++    /// `-Zearly-metadata`, and a unit's dependents start as soon as its early
++    /// metadata is written, before its function bodies are checked.
++    pub fn headstart_enabled(&self) -> bool {
++        headstart()
++    }
++
+     /// Returns whether when `unit` is built whether it should emit metadata as
+     /// well because some compilations rely on that.
+     pub fn rmeta_required(&self, unit: &Unit) -> bool {
+@@ -816,3 +832,25 @@ impl<'a, 'gctx> BuildRunner<'a, 'gctx> {
+         }
+     }
+ }
++
++/// Whether, with headstart, `parent` can start on `dep`'s early metadata.
++fn headstart_starts_early(parent: &Unit, dep: &Unit) -> bool {
++    let compiled_by_rustc = matches!(
++        parent.mode,
++        CompileMode::Build | CompileMode::Test | CompileMode::Check { .. }
++    );
++    let dep_is_rlib = dep.target.is_lib() && !dep.requires_upstream_objects();
++    compiled_by_rustc
++        && dep_is_rlib
++        && if parent.mode.is_check() {
++            dep.mode == (CompileMode::Check { test: false })
++        } else {
++            dep.mode == CompileMode::Build
++        }
++}
++
++fn headstart() -> bool {
++    static ON: std::sync::LazyLock<bool> =
++        std::sync::LazyLock::new(|| std::env::var_os("CARGO_HEADSTART").is_some_and(|v| v == "1"));
++    *ON
++}
+diff --git a/src/compiler/job_queue/job_state.rs b/src/compiler/job_queue/job_state.rs
+index b866821..e4f2649 100644
+--- a/src/compiler/job_queue/job_state.rs
++++ b/src/compiler/job_queue/job_state.rs
+@@ -50,6 +50,9 @@ pub struct JobState<'a, 'gctx> {
+     /// sending a double message later on.
+     rmeta_required: Cell<bool>,
+ 
++    /// Whether `rmeta_produced` has released this unit's dependents already.
++    rmeta_announced: Cell<bool>,
++
+     /// Manages locks for build units when fine grain locking is enabled.
+     lock_manager: Arc<LockManager>,
+ 
+@@ -74,6 +77,7 @@ impl<'a, 'gctx> JobState<'a, 'gctx> {
+             messages,
+             output,
+             rmeta_required: Cell::new(rmeta_required),
++            rmeta_announced: Cell::new(false),
+             lock_manager,
+             warning_handling,
+             _marker: marker::PhantomData,
+@@ -88,7 +92,7 @@ impl<'a, 'gctx> JobState<'a, 'gctx> {
+         if let Some(dedupe) = self.output {
+             writeln!(dedupe.gctx.shell().out(), "{}", stdout)?;
+         } else {
+-            self.messages.push_bounded(Message::Stdout(stdout));
++            self.messages.push_bounded(Message::Stdout(self.id, stdout));
+         }
+         Ok(())
+     }
+@@ -99,7 +103,7 @@ impl<'a, 'gctx> JobState<'a, 'gctx> {
+             shell.print_ansi_stderr(stderr.as_bytes())?;
+             shell.err().write_all(b"\n")?;
+         } else {
+-            self.messages.push_bounded(Message::Stderr(stderr));
++            self.messages.push_bounded(Message::Stderr(self.id, stderr));
+         }
+         Ok(())
+     }
+@@ -144,12 +148,29 @@ impl<'a, 'gctx> JobState<'a, 'gctx> {
+         });
+     }
+ 
++    /// Headstart: rustc paused, waiting for a dependency's full metadata or
++    /// rlib.
++    pub fn paused(&self) {
++        self.messages.push(Message::Paused(self.id));
++    }
++
++    /// Headstart: a paused rustc resumed.
++    pub fn resumed(&self) {
++        self.messages.push(Message::Resumed(self.id));
++    }
++
+     /// A method used to signal to the coordinator thread that the rmeta file
+     /// for an rlib has been produced. This is only called for some rmeta
+     /// builds when required, and can be called at any time before a job ends.
+-    /// This should only be called once because a metadata file can only be
+-    /// produced once!
++    ///
++    /// Only the first call has an effect. With headstart, rustc announces
++    /// early metadata and then full metadata, and both call this.
+     pub fn rmeta_produced(&self) {
++        // With headstart, rustc announces early and then full metadata;
++        // dependents are released on the first.
++        if self.rmeta_announced.replace(true) {
++            return;
++        }
+         self.rmeta_required.set(false);
+         self.messages
+             .push(Message::Finish(self.id, Artifact::Metadata, Ok(())));
+diff --git a/src/compiler/job_queue/mod.rs b/src/compiler/job_queue/mod.rs
+index a581e11..1b7b30b 100644
+--- a/src/compiler/job_queue/mod.rs
++++ b/src/compiler/job_queue/mod.rs
+@@ -210,6 +210,43 @@ struct DrainState<'gctx> {
+     /// How many jobs we've finished
+     finished: usize,
+     per_package_future_incompat_reports: Vec<FutureIncompatReportPackage>,
++
++    /// Headstart: output of units whose dependencies haven't finished yet.
++    provisional: Provisional,
++
++    /// Headstart: jobs paused, waiting for a dependency's full metadata or
++    /// rlib. They don't hold a job slot, so theirs goes to other work. A
++    /// paused job resumes as soon as its file is written, without waiting for
++    /// a slot, so it can't be starved by work started in its place; it counts
++    /// as running again, and no new job starts until enough jobs finish.
++    paused: HashSet<JobId>,
++}
++
++/// With headstart (`CARGO_HEADSTART=1`), a unit starts on a dependency's
++/// early metadata, and the dependency can still fail afterwards. Cargo only
++/// reports output from units whose dependencies are error-free: while any
++/// dependency is unconfirmed, a unit's diagnostics, JSON messages and result
++/// are held, and if a dependency fails they're dropped. A failing build
++/// prints what it prints today. A held unit gives up its job slot as usual.
++#[derive(Default)]
++struct Provisional {
++    enabled: bool,
++    /// The job each started unit runs as.
++    ids: HashMap<Unit, JobId>,
++    /// Units that finished cleanly, with every dependency confirmed.
++    confirmed: HashSet<JobId>,
++    /// Units that failed.
++    failed: HashSet<JobId>,
++    /// For each unit with unconfirmed dependencies, which ones.
++    waiting_on: HashMap<JobId, HashSet<JobId>>,
++    /// Output held for waiting units, in order.
++    held: HashMap<JobId, Vec<Message>>,
++    /// Waiting units that already finished, with their result.
++    finished: HashMap<JobId, (Unit, CargoResult<()>)>,
++    /// Units with a failed dependency: their output is dropped.
++    tainted: HashSet<JobId>,
++    /// Errors of units released after they finished, for the drain loop.
++    released_errors: Vec<ErrorToHandle>,
+ }
+ 
+ /// Count of warnings, used to print a summary after the job succeeds
+@@ -357,8 +394,8 @@ enum Artifact {
+ 
+ enum Message {
+     Run(JobId, String),
+-    Stdout(String),
+-    Stderr(String),
++    Stdout(JobId, String),
++    Stderr(JobId, String),
+ 
+     // This is for general stderr output from subprocesses
+     Diagnostic {
+@@ -389,6 +426,12 @@ enum Message {
+     Finish(JobId, Artifact, CargoResult<()>),
+     FutureIncompatReport(JobId, Vec<FutureBreakageItem>),
+     SectionTiming(JobId, SectionTiming),
++
++    /// Headstart: rustc paused, waiting for a dependency's full metadata or
++    /// rlib.
++    Paused(JobId),
++    /// Headstart: a paused rustc resumed.
++    Resumed(JobId),
+     UnusedExterns(JobId, std::collections::BTreeSet<InternedString>),
+ }
+ 
+@@ -453,7 +496,17 @@ impl<'gctx> JobQueue<'gctx> {
+         // the target as well. This should ensure that edges changed to
+         // `Metadata` propagate upwards `All` dependencies to anything that
+         // transitively contains the `Metadata` edge.
+-        if unit.requires_upstream_objects() {
++        //
++        // Headstart: a unit compiled by rustc needs only its direct
++        // dependencies' metadata, whose own dependencies' metadata came first.
++        // A check unit never links; one that does waits for the rlibs itself
++        // before linking.
++        let rustc_waits_for_rlibs = build_runner.headstart_enabled()
++            && matches!(
++                unit.mode,
++                CompileMode::Build | CompileMode::Test | CompileMode::Check { .. }
++            );
++        if unit.requires_upstream_objects() && !rustc_waits_for_rlibs {
+             for dep in dependencies {
+                 depend_on_deps_of_deps(build_runner, &mut queue_deps, dep.unit.clone());
+             }
+@@ -523,6 +576,11 @@ impl<'gctx> JobQueue<'gctx> {
+             ),
+             finished: 0,
+             per_package_future_incompat_reports: Vec::new(),
++            provisional: Provisional {
++                enabled: build_runner.headstart_enabled(),
++                ..Default::default()
++            },
++            paused: HashSet::default(),
+         };
+ 
+         // Create a helper thread for acquiring jobserver tokens
+@@ -607,8 +665,13 @@ impl<'gctx> DrainState<'gctx> {
+         Ok(())
+     }
+ 
++    /// Jobs holding a job slot: active ones, minus paused ones (headstart).
++    fn slot_holders(&self) -> usize {
++        self.active.len().saturating_sub(self.paused.len())
++    }
++
+     fn has_extra_tokens(&self) -> bool {
+-        self.active.len() < self.tokens.len() + 1
++        self.slot_holders() < self.tokens.len() + 1
+     }
+ 
+     fn handle_event(
+@@ -616,7 +679,9 @@ impl<'gctx> DrainState<'gctx> {
+         build_runner: &mut BuildRunner<'_, '_>,
+         event: Message,
+     ) -> Result<(), ErrorToHandle> {
+-        let warning_handling = build_runner.bcx.gctx.warning_handling()?;
++        let Some(event) = self.hold(build_runner, event) else {
++            return Ok(());
++        };
+         match event {
+             Message::Run(id, cmd) => {
+                 build_runner
+@@ -627,10 +692,10 @@ impl<'gctx> DrainState<'gctx> {
+                 self.timings
+                     .unit_start(build_runner, id, self.active[&id].clone());
+             }
+-            Message::Stdout(out) => {
++            Message::Stdout(_, out) => {
+                 writeln!(build_runner.bcx.gctx.shell().out(), "{}", out)?;
+             }
+-            Message::Stderr(err) => {
++            Message::Stderr(_, err) => {
+                 let mut shell = build_runner.bcx.gctx.shell();
+                 shell.print_ansi_stderr(err.as_bytes())?;
+                 shell.err().write_all(b"\n")?;
+@@ -678,34 +743,11 @@ impl<'gctx> DrainState<'gctx> {
+                     // from the `active` map ...
+                     Artifact::All => {
+                         trace!("end: {:?}", id);
++                        self.paused.remove(&id);
+                         self.finished += 1;
+                         let unit = self.active.remove(&id).unwrap();
+-                        // An error could add an entry for a `Unit`
+-                        // with 0 warnings but having fixable
+-                        // warnings be disallowed
+-                        let count = self
+-                            .warning_count
+-                            .get(&id)
+-                            .filter(|count| 0 < count.total)
+-                            .cloned();
+-                        if let Some(count) = count {
+-                            let denied_warnings =
+-                                warning_handling == WarningHandling::Deny && 0 < count.lints;
+-                            self.report_warning_count(
+-                                build_runner,
+-                                &unit,
+-                                &count,
+-                                &build_runner.bcx.rustc().workspace_wrapper,
+-                                denied_warnings,
+-                            );
+-                            let stop_on_warnings = denied_warnings
+-                                && !build_runner.bcx.build_config.keep_going
+-                                && !count.supplanted_by_errors;
+-                            if stop_on_warnings {
+-                                result = Err(anyhow::format_err!(
+-                                    "warnings are denied by `build.warnings` configuration"
+-                                ))
+-                            }
++                        if let Err(denied) = self.report_warnings(build_runner, id, &unit) {
++                            result = Err(denied);
+                         }
+                         unit
+                     }
+@@ -718,7 +760,12 @@ impl<'gctx> DrainState<'gctx> {
+                 };
+                 debug!("end ({:?}): {:?}", unit, result);
+                 match result {
+-                    Ok(()) => self.finish(id, &unit, artifact, build_runner)?,
++                    Ok(()) => {
++                        self.finish(id, &unit, artifact, build_runner)?;
++                        if artifact == Artifact::All {
++                            self.settle(build_runner, id, true);
++                        }
++                    }
+                     Err(_) if build_runner.bcx.unit_can_fail_for_docscraping(&unit) => {
+                         build_runner
+                             .failed_scrape_units
+@@ -728,6 +775,7 @@ impl<'gctx> DrainState<'gctx> {
+                         self.queue.finish(&unit, &artifact);
+                     }
+                     Err(error) => {
++                        self.settle(build_runner, id, false);
+                         let show_warnings = true;
+                         self.emit_log_messages(&unit, build_runner, show_warnings)?;
+                         self.back_compat_notice(build_runner, &unit)?;
+@@ -762,11 +810,188 @@ impl<'gctx> DrainState<'gctx> {
+             Message::SectionTiming(id, section) => {
+                 self.timings.unit_section_timing(build_runner, id, &section);
+             }
++            Message::Paused(id) => {
++                self.paused.insert(id);
++            }
++            Message::Resumed(id) => {
++                self.paused.remove(&id);
++            }
+         }
+ 
+         Ok(())
+     }
+ 
++    /// Reports a finished unit's warning count. Returns an error if its
++    /// warnings are denied.
++    fn report_warnings(
++        &mut self,
++        build_runner: &mut BuildRunner<'_, '_>,
++        id: JobId,
++        unit: &Unit,
++    ) -> CargoResult<()> {
++        let warning_handling = build_runner.bcx.gctx.warning_handling()?;
++        // An error could add an entry for a `Unit`
++        // with 0 warnings but having fixable
++        // warnings be disallowed
++        let count = self
++            .warning_count
++            .get(&id)
++            .filter(|count| 0 < count.total)
++            .cloned();
++        if let Some(count) = count {
++            let denied_warnings = warning_handling == WarningHandling::Deny && 0 < count.lints;
++            self.report_warning_count(
++                build_runner,
++                unit,
++                &count,
++                &build_runner.bcx.rustc().workspace_wrapper,
++                denied_warnings,
++            );
++            let stop_on_warnings = denied_warnings
++                && !build_runner.bcx.build_config.keep_going
++                && !count.supplanted_by_errors;
++            if stop_on_warnings {
++                anyhow::bail!("warnings are denied by `build.warnings` configuration")
++            }
++        }
++        Ok(())
++    }
++
++    /// Headstart: holds `event` if it belongs to a unit with unconfirmed
++    /// dependencies, and drops it if the unit has a failed dependency.
++    /// Returns the event if it should be handled now.
++    fn hold(&mut self, build_runner: &mut BuildRunner<'_, '_>, event: Message) -> Option<Message> {
++        if !self.provisional.enabled {
++            return Some(event);
++        }
++        let id = match &event {
++            Message::Stdout(id, _)
++            | Message::Stderr(id, _)
++            | Message::Diagnostic { id, .. }
++            | Message::WarningCount { id, .. }
++            | Message::Warning { id, .. }
++            | Message::Finish(id, Artifact::All, _) => *id,
++            _ => return Some(event),
++        };
++        if self.provisional.tainted.contains(&id) {
++            if let Message::Finish(..) = event {
++                self.active.remove(&id);
++                self.paused.remove(&id);
++                self.finished += 1;
++            }
++            return None;
++        }
++        if !self.provisional.waiting_on.contains_key(&id) {
++            return Some(event);
++        }
++        match event {
++            Message::Finish(id, _, result) => {
++                // Free the job slot and unblock dependents now; only the
++                // report waits.
++                let unit = self.active.remove(&id).unwrap();
++                self.paused.remove(&id);
++                self.finished += 1;
++                if result.is_ok() {
++                    if let Err(error) = self.finish(id, &unit, Artifact::All, build_runner) {
++                        self.provisional.released_errors.push(error.into());
++                    }
++                }
++                self.provisional.finished.insert(id, (unit, result));
++            }
++            event => self.provisional.held.entry(id).or_default().push(event),
++        }
++        None
++    }
++
++    /// Headstart: `id` finished cleanly with every dependency confirmed
++    /// (`ok`), or failed. Releases or drops its dependents' output.
++    fn settle(&mut self, build_runner: &mut BuildRunner<'_, '_>, id: JobId, ok: bool) {
++        if !self.provisional.enabled {
++            return;
++        }
++        if ok {
++            self.provisional.confirmed.insert(id);
++        } else {
++            self.provisional.failed.insert(id);
++        }
++        let dependents: Vec<JobId> = self
++            .provisional
++            .waiting_on
++            .iter()
++            .filter(|(_, deps)| deps.contains(&id))
++            .map(|(&dependent, _)| dependent)
++            .collect();
++        for dependent in dependents {
++            if !ok {
++                self.taint(dependent);
++                continue;
++            }
++            let deps = self.provisional.waiting_on.get_mut(&dependent).unwrap();
++            deps.remove(&id);
++            if deps.is_empty() {
++                self.provisional.waiting_on.remove(&dependent);
++                self.release(build_runner, dependent);
++            }
++        }
++    }
++
++    /// Headstart: a dependency of `id` failed, so drop its output, and its
++    /// dependents' output.
++    fn taint(&mut self, id: JobId) {
++        if !self.provisional.tainted.insert(id) {
++            return;
++        }
++        self.provisional.waiting_on.remove(&id);
++        self.provisional.held.remove(&id);
++        self.provisional.finished.remove(&id);
++        let dependents: Vec<JobId> = self
++            .provisional
++            .waiting_on
++            .iter()
++            .filter(|(_, deps)| deps.contains(&id))
++            .map(|(&dependent, _)| dependent)
++            .collect();
++        for dependent in dependents {
++            self.taint(dependent);
++        }
++    }
++
++    /// Headstart: every dependency of `id` is confirmed. Emits its held
++    /// output, and its result if it has finished.
++    fn release(&mut self, build_runner: &mut BuildRunner<'_, '_>, id: JobId) {
++        for event in self.provisional.held.remove(&id).unwrap_or_default() {
++            if let Err(err) = self.handle_event(build_runner, event) {
++                self.provisional.released_errors.push(err);
++            }
++        }
++        let Some((unit, result)) = self.provisional.finished.remove(&id) else {
++            return;
++        };
++        let result = match self.report_warnings(build_runner, id, &unit) {
++            Err(denied) => Err(denied),
++            Ok(()) => result,
++        };
++        match result {
++            Ok(()) => self.settle(build_runner, id, true),
++            Err(error) => {
++                self.settle(build_runner, id, false);
++                let show_warnings = true;
++                for result in [
++                    self.emit_log_messages(&unit, build_runner, show_warnings),
++                    self.back_compat_notice(build_runner, &unit),
++                ] {
++                    if let Err(err) = result {
++                        self.provisional.released_errors.push(err.into());
++                    }
++                }
++                self.provisional.released_errors.push(ErrorToHandle {
++                    error,
++                    print_always: true,
++                });
++            }
++        }
++    }
++
+     // This will also tick the progress bar as appropriate
+     fn wait_for_events(&mut self) -> Vec<Message> {
+         // Drain all events at once to avoid displaying the progress bar
+@@ -779,7 +1004,7 @@ impl<'gctx> DrainState<'gctx> {
+         if events.is_empty() {
+             loop {
+                 self.tick_progress();
+-                self.tokens.truncate(self.active.len() - 1);
++                self.tokens.truncate(self.slot_holders().saturating_sub(1));
+                 match self.messages.pop(Duration::from_millis(500)) {
+                     Some(message) => {
+                         events.push(message);
+@@ -843,6 +1068,9 @@ impl<'gctx> DrainState<'gctx> {
+                 if let Err(event_err) = self.handle_event(build_runner, event) {
+                     self.handle_error(&mut build_runner.bcx.gctx.shell(), &mut errors, event_err);
+                 }
++                for err in std::mem::take(&mut self.provisional.released_errors) {
++                    self.handle_error(&mut build_runner.bcx.gctx.shell(), &mut errors, err);
++                }
+             }
+         }
+         self.progress.clear();
+@@ -926,7 +1154,13 @@ impl<'gctx> DrainState<'gctx> {
+         let new_err = new_err.into();
+         if new_err.print_always || err_state.count == 0 {
+             crate::display_error(&new_err.error, shell);
+-            if err_state.count == 0 && !self.active.is_empty() {
++            // Headstart: jobs whose dependency failed don't count; their
++            // output is dropped.
++            let waiting_for_others = self
++                .active
++                .keys()
++                .any(|id| !self.provisional.tainted.contains(id));
++            if err_state.count == 0 && waiting_for_others {
+                 self.progress.indicate_error();
+                 let _ = shell.warn("build failed, waiting for other jobs to finish...");
+             }
+@@ -1003,6 +1237,22 @@ impl<'gctx> DrainState<'gctx> {
+         debug!("start {}: {:?}", id, unit);
+ 
+         assert!(self.active.insert(id, unit.clone()).is_none());
++        if self.provisional.enabled {
++            let deps: Vec<JobId> = build_runner
++                .unit_deps(unit)
++                .iter()
++                .filter_map(|dep| self.provisional.ids.get(&dep.unit).copied())
++                .filter(|dep| !self.provisional.confirmed.contains(dep))
++                .collect();
++            if deps.iter().any(|dep| self.provisional.failed.contains(dep)) {
++                self.provisional.tainted.insert(id);
++            } else if !deps.is_empty() {
++                self.provisional
++                    .waiting_on
++                    .insert(id, deps.into_iter().collect());
++            }
++            self.provisional.ids.insert(unit.clone(), id);
++        }
+ 
+         let messages = self.messages.clone();
+         let is_fresh = job.freshness().is_fresh();
+@@ -1078,7 +1328,12 @@ impl<'gctx> DrainState<'gctx> {
+         let count = self.warning_count.entry(id).or_default();
+         count.total += 1;
+         if lint {
+-            let unit = self.active.get(&id).unwrap();
++            // A held unit (see `Provisional`) may have finished already.
++            let unit = self
++                .active
++                .get(&id)
++                .or_else(|| self.provisional.finished.get(&id).map(|(unit, _)| unit))
++                .unwrap();
+             // If this is an upstream dep but we *do* want warnings, make sure that they
+             // don't fail compilation.
+             if unit.is_local() {
+diff --git a/src/compiler/mod.rs b/src/compiler/mod.rs
+index fae7bab..838c33c 100644
+--- a/src/compiler/mod.rs
++++ b/src/compiler/mod.rs
+@@ -395,6 +395,8 @@ fn rustc(
+         output_options.show_diagnostics = false;
+     }
+     let env_config = Arc::clone(build_runner.bcx.gctx.env_config()?);
++    let headstart = build_runner.headstart_enabled();
++
+     return Ok(Work::new(move |state| {
+         // Artifacts are in a different location than typical units,
+         // hence we must assure the crate- and target-dependent
+@@ -452,6 +454,20 @@ fn rustc(
+             }
+         }
+ 
++        // Headstart: dependents that started on this unit's early metadata
++        // wait for its full metadata before code generation. If this unit
++        // fails, its early metadata is withdrawn (deleted), which tells them
++        // it won't come. rustc does this itself on errors; this covers crashes.
++        let early_metadata: Vec<PathBuf> = if headstart {
++            outputs
++                .iter()
++                .filter(|output| output.path.extension() == Some(OsStr::new("rmeta")))
++                .map(|output| root.join(&output.path).with_extension("early-rmeta"))
++                .collect()
++        } else {
++            Vec::new()
++        };
++
+         state.running(&rustc);
+         let timestamp = paths::set_invocation_time(&fingerprint_dir)?;
+         if let Some(sbom) = sbom {
+@@ -514,6 +530,12 @@ fn rustc(
+                 format!("could not compile {name}{errors}{warnings}")
+             });
+ 
++        if result.is_err() {
++            for path in &early_metadata {
++                let _ = paths::remove_file(path);
++            }
++        }
++
+         if let Err(e) = result {
+             if let Some(diagnostic) = failed_scrape_diagnostic {
+                 state.warning(diagnostic);
+@@ -1346,6 +1368,12 @@ fn build_base_args(
+         }
+     }
+ 
++    // Headstart: rustc writes early metadata for dependents to start on, and
++    // loads dependencies from theirs, waiting for full metadata before code
++    // generation.
++    if build_runner.headstart_enabled() {
++        cmd.arg("-Zearly-metadata");
++    }
+     if unit.mode.is_check() {
+         cmd.arg("--emit=dep-info,metadata");
+     } else if !build_runner
+@@ -2359,13 +2387,35 @@ fn on_stderr_line_inner(
+     struct ArtifactNotification<'a> {
+         #[serde(borrow)]
+         artifact: Cow<'a, str>,
++        #[serde(borrow, default)]
++        emit: Option<Cow<'a, str>>,
+     }
+ 
+     if let Ok(artifact) = serde_json::from_str::<ArtifactNotification<'_>>(compiler_message.get()) {
+         trace!("found directive from rustc: `{}`", artifact.artifact);
+-        if artifact.artifact.ends_with(".rmeta") {
+-            debug!("looks like metadata finished early!");
+-            state.rmeta_produced();
++        match artifact.emit.as_deref() {
++            // Headstart: early metadata (`-Zearly-metadata`) is enough for
++            // dependents to start; full metadata follows.
++            Some("early-metadata") => {
++                debug!("early metadata written");
++                state.rmeta_produced();
++            }
++            // Headstart: rustc paused before code generation or linking,
++            // waiting for a dependency's full metadata or rlib. It doesn't
++            // hold a job slot meanwhile.
++            Some("wait-metadata") => {
++                debug!("waiting for `{}`", artifact.artifact);
++                state.paused();
++            }
++            Some("resume") => {
++                debug!("resumed");
++                state.resumed();
++            }
++            _ if artifact.artifact.ends_with(".rmeta") => {
++                debug!("looks like metadata finished early!");
++                state.rmeta_produced();
++            }
++            _ => {}
+         }
+         return Ok(false);
+     }

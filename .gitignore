@@ -1,4 +1,7 @@
-# Benchmark scratch: copied projects and their target dirs.
-/results/*/work/
+# Test build output.
 /tests/smoke/target/
 /tests/smoke/Cargo.lock
+rustc-ice-*.txt
+/tests/errors/target/
+# Benchmark output (scripts/bench*.sh), kept out of git for now.
+/results/
