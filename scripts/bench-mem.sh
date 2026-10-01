@@ -24,7 +24,7 @@ for dir in "$@"; do
     for mode in off on; do
       rm -rf "$dir/target"
       start=$(now)
-      (cd "$dir" && CARGO_HEADSTART=$([ $mode = on ] && echo 1 || echo 0) \
+      (cd "$dir" && CARGO_UNSTABLE_HEADSTART=$([ $mode = on ] && echo true || echo false) \
         "$cargo" check -q --offline >/dev/null 2>&1) &
       pid=$! peak=0
       while kill -0 $pid 2>/dev/null; do

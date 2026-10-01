@@ -17,6 +17,18 @@ at the end of the round that added the real-project measurements
   overlaps. On top of it, headstart adds up to 25% on real projects, and
   up to 32% on rustc-perf. Three real-project results are within noise
   of even (−1% to −2%).
+- **Reproduced on a 4-core container** (see results.md): smaller gains,
+  as expected with fewer idle cores.
+  - rust-analyzer: 24% for check, 13–15% for build.
+  - Nothing meaningfully slower.
+  - [readiness.md](readiness.md) assesses whether it's ready to bring to
+    the compiler and cargo teams.
+- **In upstream shape.** The patches are a commit series, six for rustc
+  and three for cargo, each building on its own, `fmt` and `tidy` clean,
+  with in-tree tests ([patches/README.md](../patches/README.md)):
+  - Waiting uses output locks instead of polling.
+  - The hooks are gated on the flag.
+  - cargo's switch is `-Zheadstart`.
 - **Correctness evidence:**
   - Sweeps of all 53 rustc-perf benchmarks with `-Zearly-metadata-verify`:
     debug, release and `-Zthreads=8`, in check and build.
@@ -31,7 +43,8 @@ at the end of the round that added the real-project measurements
 
   A review of the PR also found that rustc didn't withdraw early metadata
   when code generation failed during linking. Only cargo covered that.
-  The guard now lasts through linking.
+  The guard now lasts through linking, and holds the rlib's lock until
+  the rlib is written.
 
 ## Moving to Claude Code containers
 
@@ -54,6 +67,8 @@ scripts that lived in its `/tmp` are now `scripts/sweep.sh` and
 - **Network:** GitHub, crates.io, and rustc's CI LLVM download
   (`download-ci-llvm = true` in `config/bootstrap.toml`).
 - **Toolchains:** rustup with Rust 1.98.0, which builds the pinned cargo.
+- **`rsync`**, which `bench.sh` uses to copy each project. The Claude Code
+  container didn't have it.
 - **System packages** for the real projects: `cmake clang pkg-config
   protobuf-compiler nasm perl`, plus the dev packages for OpenSSL, SQLite,
   libpq, ALSA, libudev, X11, xkbcommon, Wayland, fontconfig, freetype and
@@ -84,6 +99,28 @@ and standard library only. A rebuild after editing the patch takes about
 | real-project timing | `scripts/bench.sh -n 3 -c check $(scripts/real-projects.sh ~/hs-real)` | 1–4 h per pass |
 | rustc UI suite | `(cd rustc && ./x test --stage 1 tests/ui)` | ~3 min |
 | cargo test suite | `(cd cargo && cargo +1.98.0 test --no-fail-fast)` (see SIGINT below) | ~3 min |
+
+**Lessons from the Claude Code container** (4 cores, 15 GB RAM, ~30 GB
+of disk):
+
+- **The container is reclaimed when the session goes idle,** which kills
+  detached benchmark runs. Keep the session active while one runs, and
+  use a driver that skips finished work.
+  - Results under `results/` survived both restarts.
+  - Write one `bench.sh` out-dir per project, so a restart costs one
+    project's runs, not the whole pass.
+- **Absolute times move between restarts** (about 20% after the second
+  one), so compare off and on within a session only. `bench.sh` already
+  does.
+- **Disk:**
+  - The compiler build with `incremental = false` is 4.2 GB.
+  - The registry for rust-analyzer, six real projects and the rustc-perf
+    set is 4 GB.
+  - bevy's debug build peaked at about 11 GB.
+  - helix's work copy holds 2.5 GB of compiled grammars.
+  - polars, zed and lemmy don't fit.
+- **One-time build-script work** outside `target` (helix's grammars) lands
+  on the first timed run. Use `bench.sh -w` for real projects.
 
 **Lessons from the VM:**
 
@@ -128,7 +165,7 @@ that crowds the critical path:
 - its own crates each run slower.
 
 **How:**
-- Add a cargo knob for A/B runs, e.g. `CARGO_HEADSTART_RESUME=slot`, so a
+- Add a cargo knob for A/B runs, e.g. `-Zheadstart=resume-with-slot`, so a
   resumed job waits for a slot. That's the `slot_holders()` accounting in
   `src/compiler/job_queue/mod.rs`.
   - Resuming without a slot fixed cargo-0.87.1 on the default front end
@@ -143,12 +180,17 @@ that crowds the critical path:
 
 ### 2. Fewer cores
 
-**Problem.** Every timing so far uses 16 jobs. Laptops have 8–12 cores,
-and the machine saturates sooner there, so there's less idle time for
-headstart to fill.
+**Problem.** Laptops have 8–12 cores. The machine saturates sooner there,
+so there's less idle time for headstart to fill.
 
-**How:** `bench.sh -j 8` and `-j 4` on the rustc-perf set and a few real
-projects, with and without `-Zthreads`.
+**Done at 4 jobs** (results.md, "Reproduction on 4 cores"):
+- rust-analyzer saves 24% for check and 15% for build.
+- The rustc-perf set saves 1–35%.
+- Wide real projects come out even (lldap, typst, bevy: −1% to +4%).
+- The schedules show 4 cores nearly saturated with headstart on.
+
+**Still to do:** `bench.sh -j 8` on the same set, the common laptop size,
+and `-Zthreads` at 4 and 8 jobs.
 
 ### 3. Memory
 
@@ -175,31 +217,47 @@ check-only version.
 
 ### 5. Tests that can live upstream
 
-**Problem.** The evidence lives in shell scripts here.
+**Done:**
+- **rustc:** `tests/run-make/early-metadata`:
+  - the swap at `opt-level` 0 and 2, with the full metadata hidden and its
+    lock held;
+  - a dependency that stops without writing it;
+  - verify reporting nothing.
+- **cargo:** `tests/testsuite/headstart.rs`:
+  - the flag;
+  - passing `-Zearly-metadata`;
+  - dropped and released output;
+  - linked-unit freshness;
+  - every unit kind with one and four jobs.
 
-**How:**
-- **rustc:**
-  - Turn `check-swap.sh` into a `run-make` test: build a crate, hide its
-    full metadata, start the dependent, restore the files on the
-    `wait-metadata` notification.
-  - Add UI tests for `-Zearly-metadata-verify`.
-  - Run the UI suite with the flag forced on, via compiletest's
-    `--target-rustcflags=-Zearly-metadata`, to see what breaks.
-- **cargo:** testsuite tests for:
-  - provisional output (a dependent's warnings dropped when its
-    dependency fails);
-  - retraction (the early file deleted on failure);
-  - pause accounting (a paused job frees its slot).
+- **The UI suite with the flag forced on:** `./x test tests/ui
+  --force-rerun --compiletest-rustc-args "-Zearly-metadata
+  -Zearly-metadata-verify"`.
+  - It found three bug classes, now fixed (readiness.md): errors in
+    interface bodies ICEd; async closures' by-move bodies were created too
+    early, and in parallel; metadata-only dependencies were waited on for
+    an rlib.
+  - 4 of 22,170 tests still differ, all in expected output that depends
+    on when bodies are checked.
+
+**Still to do:**
+- UI tests that make `-Zearly-metadata-verify` report something.
+- A cargo test that pause accounting frees a slot, which needs a rustc
+  that pauses for a controlled time.
 
 ### 6. Platforms
 
 **Problem.**
-- **Windows:** retraction deletes a file that dependents may have
-  memory-mapped, which can fail there. This is untested.
-- **macOS:** only the first version was measured.
+- **Windows:** waiting now uses `std`'s file locks, which Windows
+  supports, and a failure no longer depends on deleting files other
+  compilations have open. But it has never run there.
+- **macOS:** only the first version was measured, and nothing has run
+  there since the locks replaced polling.
 
-**How:** a Windows CI run of `check-errors.sh` (the retraction
-scenarios), and a macOS timing pass.
+**How:**
+- A Windows CI run of the run-make test, cargo's headstart tests and
+  `check-errors.sh`.
+- A macOS run of the same, and a timing pass.
 
 ### 7. Clippy and rustdoc on the current version
 
@@ -211,39 +269,42 @@ version.
 
 ### 8. Rebase onto a newer rustc
 
-**Problem.** The patch is against rustc `a22b02e` and cargo `3d7cf6e`.
-meilisearch's current code no longer compiles with that rustc, with or
-without headstart.
+**Done on 2026-10-01.** The patches are now against rust-lang/rust
+`6006fd0` and cargo `4f3fb24`, up from `a22b02e` and `3d7cf6e`.
+- Both applied without conflicts.
+- The sweeps, the check scripts, rustc's UI suite and the timings were
+  rerun afterwards (results.md, "After rebasing onto current master").
 
-**How:**
-- Bump the submodules and reapply the patches.
-- Expect conflicts in `rustc_metadata` (`encoder.rs`, `creader.rs`,
-  `locator.rs`), and in `rustc_interface/src/passes.rs`.
-- Rebuild, then run `check-swap.sh` and the sweeps before any timing.
+**To repeat it:**
+1. Fetch each master into its submodule.
+2. Check out the new commit.
+3. Run `git apply -3` with the patch.
+4. Regenerate the patch with `git diff`.
+5. Record the new submodule commits.
+6. Rebuild, then run `check-swap.sh` and the sweeps before any timing.
+
+Expect conflicts in `rustc_metadata` (`encoder.rs`, `creader.rs`,
+`locator.rs`) and `rustc_interface/src/passes.rs` once upstream touches
+them.
+
+meilisearch didn't compile with the old pin; it hasn't been retried.
 
 ### 9. The path upstream
 
 **Problem.** This is a proposal-sized change to both tools.
 
-**How:** pieces that could land separately, roughly in order:
-
-1. **rustc: skip the reachable set in full metadata without codegen.**
-   It's never read there, and computing it optimizes MIR at
-   opt-level ≥ 1. Useful without headstart; small.
-2. **rustc: split `analysis` with `analysis_interfaces`.** A refactor with
-   no behavior change.
-3. **rustc: `-Zearly-metadata`:**
-   - the early file, the loader, the swap to full metadata, and the
-     `wait-metadata`/`resume` notifications;
-   - it needs a compiler MCP.
-4. **cargo:** pipelining on the early notification, pause accounting,
-   and provisional output, as `-Zheadstart` instead of an environment
-   variable.
+**Done:** the series in [patches/](../patches) is split the way it could
+land, and [patches/README.md](../patches/README.md) describes each commit
+and how to turn the series into PRs.
+- rustc commit 1 (no reachable set without codegen) can go first, on its
+  own.
+- Commits 2–3 are refactors.
+- Commits 4–6 (`-Zearly-metadata`) need a compiler MCP.
+- The cargo series needs the rustc side for its tests to run.
 
 **Questions reviewers will ask** (answers in [design.md](design.md)):
 - crate identity (the SVH computed from early bytes plus the HIR hash);
-- retraction by deleting a file;
-- polling for files rather than being told;
+- the output lock files, and failure signalled by releasing a lock;
 - the error-reporting delay (4 ms median, 249 ms p99 in cargo-0.87.1).
 
 ### 10. Measurements to redo on the current version
@@ -281,16 +342,9 @@ version, and the early write has changed since.
 - **LTO:** no script exercises the path where rustc waits for rlibs
   before code generation (`-C lto=fat|thin` across crates). Add it to
   `check-swap.sh`.
-- **`-Zearly-metadata` in the UI suite:** the suites above ran with the
-  flag off. Forcing it on (item 5) is the real test of the loader
-  changes.
 
 ### 12. Smaller items
 
-- **Polling.** rustc polls for the full metadata. Cargo already knows
-  when it's written, and could say so on stdin.
-- **Memory-mapped retraction.** On Unix, a waiter notices a deleted early
-  file only by polling for it.
 - **`-Zthreads` nondeterminism.** lemmy's "overflow evaluating the
   requirement" warnings land on different lines from run to run, with or
   without headstart. That's upstream behavior, but it makes

@@ -41,13 +41,22 @@ just as it writes full metadata after analysis:
 
 1. `analysis_interfaces`.
 2. `write_early_metadata`:
-   - evaluate statics and synthesize async closures' by-move bodies, the
-     only definitions that checking bodies would add (encoding freezes
-     the definitions table). Like body checking, this runs in parallel
-     under `-Zthreads`, and so does computing the MIR of consts and
-     const fns for the encoder;
-   - encode `libfoo-hash.early-rmeta`;
-   - announce it with an `early-metadata` artifact notification.
+   - Create the only definitions that checking bodies would add, since
+     encoding freezes the definitions table:
+     - statics' nested allocations, by evaluating them (in parallel under
+       `-Zthreads`, as body checking does);
+     - async closures' by-move bodies, in a sequential pass, in a
+       deterministic order, each once the item it's in is type-checked,
+       as `check_crate_bodies` does. A closure's type is only known after
+       that, and so is the type of a const argument it may be nested in.
+   - Compute what the metadata needs from bodies (`prepare_early_metadata`,
+     in parallel under `-Zthreads`): type-check the interface bodies (see
+     below), and build the MIR the encoder records for them. If that
+     reports an error, stop: no early metadata is written, and the crate
+     fails as it would without the flag. An error must not reach the
+     encoder, as an error type or tainted MIR, which can't be encoded.
+   - Encode `libfoo-hash.early-rmeta`.
+   - Announce it with an `early-metadata` artifact notification.
 3. `analysis`: the bodies.
 4. Full metadata, and code generation, as usual.
 
@@ -84,8 +93,8 @@ are still valid, including code inlined or instantiated from its bodies.
 ### What encoding still forces
 
 The encoder asks the query system for whatever the metadata contains, so
-anything a crate's interface depends on is computed on demand, bodies
-included:
+anything a crate's interface depends on comes from bodies. Those bodies
+(`interface_bodies`) are computed up front, as above:
 
 - **Opaque types.** The hidden type of an `impl Trait` in a signature
   comes from type-checking the defining function's body.
@@ -97,6 +106,11 @@ included:
   future is `Send`.
 
 Everything else waits until after the write.
+
+Because these bodies are checked before the others, an error in one of
+them (in a `const fn`, an `async fn`, or a function returning `impl Trait`)
+is reported before errors in the crate's other bodies. The errors are the
+same; only their order can differ.
 
 ### What early metadata leaves out
 
@@ -147,11 +161,27 @@ Everything else waits until after the write.
   decides which MIR full metadata encodes. Only code generation and
   linking read any of these, from full metadata.
 
-### Consuming early metadata
+### Output locks
 
-Writing early metadata first deletes the crate's stale full metadata and
-rlib. So a full `.rmeta` or `.rlib` next to early metadata is always from
-the same compilation or a later one, never an earlier one.
+Before writing early metadata, the compilation takes an exclusive lock on
+`libfoo-hash.rmeta.lock` and, if it links, on `libfoo-hash.rlib.lock`
+(`std::fs::File::lock`: `flock` on Unix, `LockFileEx` on Windows). Each is
+held until that output is written, then released, and the lock file
+removed. The full metadata's lock is released as soon as it's written, in
+`start_codegen`, so dependents waiting for it don't also wait for this
+crate's code generation. The rlib's lock is held through linking.
+
+It then deletes the crate's stale full metadata and rlib. So a full
+`.rmeta` or `.rlib` next to early metadata is always from the same
+compilation or a later one, never an earlier one.
+
+If the compilation fails (reports errors, or panics), or crashes, its
+locks are released without those outputs having been written: the
+operating system releases a crashed process's locks. That's how a
+dependent learns its dependency failed. The early metadata is deleted
+too, on errors, but nothing depends on that.
+
+### Consuming early metadata
 
 With the flag, crate loading also considers `libfoo-hash.early-rmeta`, both
 for `--extern foo=libfoo-hash.rmeta` and when searching directories for
@@ -163,9 +193,10 @@ file may not exist yet.
 Before code generation, `CStore::load_full_metadata` replaces every
 dependency loaded from early metadata with its full metadata:
 
-- **Waiting.** If the full file doesn't exist yet, rustc waits for it
-  (see *Pausing* below). It checks that the file carries the same crate
-  hash.
+- **Waiting.** If the full file doesn't exist yet, rustc waits for its
+  lock (see *Pausing* below). Then the file must exist and carry the same
+  crate hash, or the dependency failed, and the compilation stops with an
+  error.
 - **Swapping.** It loads the full blob into a new `CrateMetadata`, keeping
   what the session decided while loading the crate: its crate number
   mapping, dependency kind, and whether it's used.
@@ -178,21 +209,25 @@ dependency loaded from early metadata with its full metadata:
 - **Source files.** These are imported again from the full blob's table,
   because an imported file records its index in the table it came from.
 
-Before linking, `CStore::wait_for_rlibs` waits for the recorded rlib
-paths to exist; rlibs are written atomically. With cross-crate LTO, which
-reads dependencies' rlibs during code generation, it waits before code
-generation instead.
+Before linking, `CStore::wait_for_rlibs` waits for each recorded rlib
+that doesn't exist yet the same way, through its lock; rlibs are written
+atomically. With cross-crate LTO, which reads dependencies' rlibs during
+code generation, it waits before code generation instead.
+
+None of this runs without the flag: the hooks in `start_codegen` and
+`link` check it first.
 
 ### Pausing
 
 When rustc has to wait for a dependency's full metadata or rlib:
 
 1. It announces a `wait-metadata` artifact notification naming the file
-   (the same kind for an rlib), and polls for it.
+   (the same kind for an rlib), and blocks on a shared lock of the file's
+   lock, until the compilation writing it releases it.
 2. The build tool stops counting it as running, so its job slot can go to
    other work.
-3. Once the file exists, rustc announces `resume` and continues. The
-   build tool counts it as running again.
+3. Once the lock is released and the file exists, rustc announces
+   `resume` and continues. The build tool counts it as running again.
 
 rustc never touches the jobserver for this. A resumed compilation can
 briefly put the build one job over its limit, until the next job
@@ -203,17 +238,15 @@ critical path (see [results.md](results.md)).
 The crate graph has no cycles, so what a paused compilation waits for is
 always running or queued, and waiting can't deadlock.
 
-**Retraction.** If a crate fails after writing early metadata, its
-promise is withdrawn: the early file is deleted. rustc does this when a
-compilation ends with errors or panics, through linking, which is where
-code generation finishes and the rlib is written. A build tool has to
-do it when the compiler is killed or aborts. A compilation waiting for that crate's full metadata or
-rlib sees the early metadata disappear, and stops with an error. Its
-output is dropped anyway (below).
+**Failure.** If a crate fails after writing early metadata, a
+compilation waiting for its full metadata or rlib gets the lock without
+the file, and stops with an error. That works however the crate failed,
+including a crash, with nothing for the build tool to clean up. The
+waiting compilation's output is dropped anyway (below).
 
-## cargo: `CARGO_HEADSTART=1`
+## cargo: `-Zheadstart`
 
-With the variable set:
+With the flag (or `[unstable] headstart = true`, or `CARGO_UNSTABLE_HEADSTART=true`):
 
 - **Every rustc compile gets `-Zearly-metadata`.** Crates with dependents
   write early metadata, and every crate can load it.
@@ -238,8 +271,6 @@ With the variable set:
   - When it announces `resume`, it counts as running again. Cargo starts
     no new work until the number of running jobs is back under the
     limit.
-- **Retraction.** When a unit fails, cargo deletes its early metadata, in
-  case rustc crashed before it could.
 - **Only error-free dependencies get their output reported.** A unit that
   started before its dependencies finished is provisional. Its
   diagnostics, JSON messages and result are held until every dependency
@@ -256,7 +287,7 @@ With the variable set:
   - the order of JSON messages across crates, which cargo doesn't
     guarantee.
 
-With the variable unset, cargo behaves exactly as upstream.
+Without it, cargo behaves exactly as upstream.
 
 ## Risks
 
@@ -276,9 +307,10 @@ With the variable unset, cargo behaves exactly as upstream.
   check` and `cargo build`. It checks that each step matches the same
   step with headstart off, and that the final state matches a clean
   build.
-- **Platforms.** Retraction deletes a file that dependents may have
-  memory-mapped. That's fine on Unix; on Windows, deleting an open file
-  can fail, and that path hasn't been tested.
+- **Platforms.** The output locks use `std`'s file locking, which works on
+  Windows too, and a failure no longer depends on deleting a file other
+  compilations have open. But nothing has been run on Windows or macOS
+  since the locks replaced polling; only Linux has.
 - **Memory.** More compilers are alive at once, including paused ones,
   so peak memory can rise (see [results.md](results.md#peak-memory),
   measured on the first, check-only version). Cargo doesn't cap the

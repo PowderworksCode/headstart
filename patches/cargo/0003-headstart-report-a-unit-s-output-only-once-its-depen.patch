@@ -1,86 +1,60 @@
-diff --git a/src/compiler/build_runner/mod.rs b/src/compiler/build_runner/mod.rs
-index 4bf69f6..5bb5e02 100644
---- a/src/compiler/build_runner/mod.rs
-+++ b/src/compiler/build_runner/mod.rs
-@@ -763,6 +763,15 @@ impl<'a, 'gctx> BuildRunner<'a, 'gctx> {
-     /// Returns whether when `parent` depends on `dep` if it only requires the
-     /// metadata file from `dep`.
-     pub fn only_requires_rmeta(&self, parent: &Unit, dep: &Unit) -> bool {
-+        // Headstart: a compile unit starts on its library dependencies' early
-+        // metadata (`-Zearly-metadata`), written before their bodies are
-+        // checked. Check units need nothing more. Units that generate code
-+        // wait for full metadata before code generation, and units that link
-+        // wait for the rlibs before linking; rustc does both. Dependencies
-+        // that must be fully built (proc macros, dylibs) still are.
-+        if headstart() && headstart_starts_early(parent, dep) {
-+            return true;
-+        }
-         // We're only a candidate for requiring an `rmeta` file if we
-         // ourselves are building an rlib,
-         !parent.requires_upstream_objects()
-@@ -773,6 +782,13 @@ impl<'a, 'gctx> BuildRunner<'a, 'gctx> {
-             && dep.mode == CompileMode::Build
-     }
+From f04986ef70b5223d230524ad7fb572ce228a5483 Mon Sep 17 00:00:00 2001
+From: Zack Maril <zmaril@users.noreply.github.com>
+Date: Thu, 1 Oct 2026 16:48:47 +0000
+Subject: [PATCH 3/3] headstart: report a unit's output only once its
+ dependencies succeed
+
+With `-Zheadstart`, a unit can start on a dependency's early metadata, and
+the dependency can still fail afterwards: its function bodies are checked
+after the early metadata is written. If it fails, the units started early
+would report diagnostics, or a result, that the build without
+`-Zheadstart` never gets to.
+
+A unit that starts while any of its dependencies hasn't finished cleanly
+is now provisional: its diagnostics, JSON messages and result are held
+until every dependency has finished cleanly, then emitted in their
+original order. If a dependency fails, they're dropped, along with those
+of units depending on it. A held unit still frees its job slot and
+unblocks its dependents when it finishes; only the report waits.
+
+So a failing build prints the same diagnostics, JSON messages and exit
+status as without `-Zheadstart`. What can differ is output that already
+depends on timing: progress lines, "waiting for other jobs", and the order
+of JSON messages across crates.
+
+A scrape-examples unit that is allowed to fail is treated as having
+succeeded, as it is when it isn't held.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_011C4oUhyTKGLkWYDeejZv2e
+---
+ doc/book/src/reference/unstable.md  |   5 +
+ src/compiler/job_queue/job_state.rs |   4 +-
+ src/compiler/job_queue/mod.rs       | 299 ++++++++++++++++++++++++----
+ tests/testsuite/headstart.rs        |  51 +++++
+ 4 files changed, 323 insertions(+), 36 deletions(-)
+
+diff --git a/doc/book/src/reference/unstable.md b/doc/book/src/reference/unstable.md
+index c701cfb..667fd10 100644
+--- a/doc/book/src/reference/unstable.md
++++ b/doc/book/src/reference/unstable.md
+@@ -2081,6 +2081,11 @@ passes to every compilation:
+   it waits for the dependency's rlib. While it waits, it announces
+   `wait-metadata`, and Cargo gives its job slot to other work until it
+   announces `resume`.
++* A dependent that started before its dependencies finished has its output
++  (diagnostics, JSON messages, and its result) held until they all finish
++  cleanly. If one fails, the output is dropped, so a failing build reports
++  what it would without `-Z headstart`. Only progress lines and the order of
++  messages across crates can differ.
  
-+    /// Whether headstart is on (`CARGO_HEADSTART=1`): units are compiled with
-+    /// `-Zearly-metadata`, and a unit's dependents start as soon as its early
-+    /// metadata is written, before its function bodies are checked.
-+    pub fn headstart_enabled(&self) -> bool {
-+        headstart()
-+    }
-+
-     /// Returns whether when `unit` is built whether it should emit metadata as
-     /// well because some compilations rely on that.
-     pub fn rmeta_required(&self, unit: &Unit) -> bool {
-@@ -816,3 +832,25 @@ impl<'a, 'gctx> BuildRunner<'a, 'gctx> {
-         }
-     }
- }
-+
-+/// Whether, with headstart, `parent` can start on `dep`'s early metadata.
-+fn headstart_starts_early(parent: &Unit, dep: &Unit) -> bool {
-+    let compiled_by_rustc = matches!(
-+        parent.mode,
-+        CompileMode::Build | CompileMode::Test | CompileMode::Check { .. }
-+    );
-+    let dep_is_rlib = dep.target.is_lib() && !dep.requires_upstream_objects();
-+    compiled_by_rustc
-+        && dep_is_rlib
-+        && if parent.mode.is_check() {
-+            dep.mode == (CompileMode::Check { test: false })
-+        } else {
-+            dep.mode == CompileMode::Build
-+        }
-+}
-+
-+fn headstart() -> bool {
-+    static ON: std::sync::LazyLock<bool> =
-+        std::sync::LazyLock::new(|| std::env::var_os("CARGO_HEADSTART").is_some_and(|v| v == "1"));
-+    *ON
-+}
+ ```toml
+ [unstable]
 diff --git a/src/compiler/job_queue/job_state.rs b/src/compiler/job_queue/job_state.rs
-index b866821..e4f2649 100644
+index a686276..e4f2649 100644
 --- a/src/compiler/job_queue/job_state.rs
 +++ b/src/compiler/job_queue/job_state.rs
-@@ -50,6 +50,9 @@ pub struct JobState<'a, 'gctx> {
-     /// sending a double message later on.
-     rmeta_required: Cell<bool>,
- 
-+    /// Whether `rmeta_produced` has released this unit's dependents already.
-+    rmeta_announced: Cell<bool>,
-+
-     /// Manages locks for build units when fine grain locking is enabled.
-     lock_manager: Arc<LockManager>,
- 
-@@ -74,6 +77,7 @@ impl<'a, 'gctx> JobState<'a, 'gctx> {
-             messages,
-             output,
-             rmeta_required: Cell::new(rmeta_required),
-+            rmeta_announced: Cell::new(false),
-             lock_manager,
-             warning_handling,
-             _marker: marker::PhantomData,
-@@ -88,7 +92,7 @@ impl<'a, 'gctx> JobState<'a, 'gctx> {
+@@ -92,7 +92,7 @@ impl<'a, 'gctx> JobState<'a, 'gctx> {
          if let Some(dedupe) = self.output {
              writeln!(dedupe.gctx.shell().out(), "{}", stdout)?;
          } else {
@@ -89,7 +63,7 @@ index b866821..e4f2649 100644
          }
          Ok(())
      }
-@@ -99,7 +103,7 @@ impl<'a, 'gctx> JobState<'a, 'gctx> {
+@@ -103,7 +103,7 @@ impl<'a, 'gctx> JobState<'a, 'gctx> {
              shell.print_ansi_stderr(stderr.as_bytes())?;
              shell.err().write_all(b"\n")?;
          } else {
@@ -98,59 +72,25 @@ index b866821..e4f2649 100644
          }
          Ok(())
      }
-@@ -144,12 +148,29 @@ impl<'a, 'gctx> JobState<'a, 'gctx> {
-         });
-     }
- 
-+    /// Headstart: rustc paused, waiting for a dependency's full metadata or
-+    /// rlib.
-+    pub fn paused(&self) {
-+        self.messages.push(Message::Paused(self.id));
-+    }
-+
-+    /// Headstart: a paused rustc resumed.
-+    pub fn resumed(&self) {
-+        self.messages.push(Message::Resumed(self.id));
-+    }
-+
-     /// A method used to signal to the coordinator thread that the rmeta file
-     /// for an rlib has been produced. This is only called for some rmeta
-     /// builds when required, and can be called at any time before a job ends.
--    /// This should only be called once because a metadata file can only be
--    /// produced once!
-+    ///
-+    /// Only the first call has an effect. With headstart, rustc announces
-+    /// early metadata and then full metadata, and both call this.
-     pub fn rmeta_produced(&self) {
-+        // With headstart, rustc announces early and then full metadata;
-+        // dependents are released on the first.
-+        if self.rmeta_announced.replace(true) {
-+            return;
-+        }
-         self.rmeta_required.set(false);
-         self.messages
-             .push(Message::Finish(self.id, Artifact::Metadata, Ok(())));
 diff --git a/src/compiler/job_queue/mod.rs b/src/compiler/job_queue/mod.rs
-index a581e11..1b7b30b 100644
+index 67b6ea3..a03ad21 100644
 --- a/src/compiler/job_queue/mod.rs
 +++ b/src/compiler/job_queue/mod.rs
-@@ -210,6 +210,43 @@ struct DrainState<'gctx> {
-     /// How many jobs we've finished
+@@ -211,6 +211,9 @@ struct DrainState<'gctx> {
      finished: usize,
      per_package_future_incompat_reports: Vec<FutureIncompatReportPackage>,
-+
+ 
 +    /// Headstart: output of units whose dependencies haven't finished yet.
 +    provisional: Provisional,
 +
-+    /// Headstart: jobs paused, waiting for a dependency's full metadata or
-+    /// rlib. They don't hold a job slot, so theirs goes to other work. A
-+    /// paused job resumes as soon as its file is written, without waiting for
-+    /// a slot, so it can't be starved by work started in its place; it counts
-+    /// as running again, and no new job starts until enough jobs finish.
-+    paused: HashSet<JobId>,
-+}
-+
-+/// With headstart (`CARGO_HEADSTART=1`), a unit starts on a dependency's
+     /// Headstart: jobs paused, waiting for a dependency's full metadata or
+     /// rlib. They don't hold a job slot, so theirs goes to other work. A
+     /// paused job resumes as soon as its file is written, without waiting for
+@@ -219,6 +222,33 @@ struct DrainState<'gctx> {
+     paused: HashSet<JobId>,
+ }
+ 
++/// With headstart (`-Zheadstart`), a unit starts on a dependency's
 +/// early metadata, and the dependency can still fail afterwards. Cargo only
 +/// reports output from units whose dependencies are error-free: while any
 +/// dependency is unconfirmed, a unit's diagnostics, JSON messages and result
@@ -175,10 +115,12 @@ index a581e11..1b7b30b 100644
 +    tainted: HashSet<JobId>,
 +    /// Errors of units released after they finished, for the drain loop.
 +    released_errors: Vec<ErrorToHandle>,
- }
- 
++}
++
  /// Count of warnings, used to print a summary after the job succeeds
-@@ -357,8 +394,8 @@ enum Artifact {
+ #[derive(Default, Clone)]
+ pub struct WarningCount {
+@@ -364,8 +394,8 @@ enum Artifact {
  
  enum Message {
      Run(JobId, String),
@@ -189,39 +131,7 @@ index a581e11..1b7b30b 100644
  
      // This is for general stderr output from subprocesses
      Diagnostic {
-@@ -389,6 +426,12 @@ enum Message {
-     Finish(JobId, Artifact, CargoResult<()>),
-     FutureIncompatReport(JobId, Vec<FutureBreakageItem>),
-     SectionTiming(JobId, SectionTiming),
-+
-+    /// Headstart: rustc paused, waiting for a dependency's full metadata or
-+    /// rlib.
-+    Paused(JobId),
-+    /// Headstart: a paused rustc resumed.
-+    Resumed(JobId),
-     UnusedExterns(JobId, std::collections::BTreeSet<InternedString>),
- }
- 
-@@ -453,7 +496,17 @@ impl<'gctx> JobQueue<'gctx> {
-         // the target as well. This should ensure that edges changed to
-         // `Metadata` propagate upwards `All` dependencies to anything that
-         // transitively contains the `Metadata` edge.
--        if unit.requires_upstream_objects() {
-+        //
-+        // Headstart: a unit compiled by rustc needs only its direct
-+        // dependencies' metadata, whose own dependencies' metadata came first.
-+        // A check unit never links; one that does waits for the rlibs itself
-+        // before linking.
-+        let rustc_waits_for_rlibs = build_runner.headstart_enabled()
-+            && matches!(
-+                unit.mode,
-+                CompileMode::Build | CompileMode::Test | CompileMode::Check { .. }
-+            );
-+        if unit.requires_upstream_objects() && !rustc_waits_for_rlibs {
-             for dep in dependencies {
-                 depend_on_deps_of_deps(build_runner, &mut queue_deps, dep.unit.clone());
-             }
-@@ -523,6 +576,11 @@ impl<'gctx> JobQueue<'gctx> {
+@@ -546,6 +576,10 @@ impl<'gctx> JobQueue<'gctx> {
              ),
              finished: 0,
              per_package_future_incompat_reports: Vec::new(),
@@ -229,26 +139,10 @@ index a581e11..1b7b30b 100644
 +                enabled: build_runner.headstart_enabled(),
 +                ..Default::default()
 +            },
-+            paused: HashSet::default(),
+             paused: HashSet::default(),
          };
  
-         // Create a helper thread for acquiring jobserver tokens
-@@ -607,8 +665,13 @@ impl<'gctx> DrainState<'gctx> {
-         Ok(())
-     }
- 
-+    /// Jobs holding a job slot: active ones, minus paused ones (headstart).
-+    fn slot_holders(&self) -> usize {
-+        self.active.len().saturating_sub(self.paused.len())
-+    }
-+
-     fn has_extra_tokens(&self) -> bool {
--        self.active.len() < self.tokens.len() + 1
-+        self.slot_holders() < self.tokens.len() + 1
-     }
- 
-     fn handle_event(
-@@ -616,7 +679,9 @@ impl<'gctx> DrainState<'gctx> {
+@@ -645,7 +679,9 @@ impl<'gctx> DrainState<'gctx> {
          build_runner: &mut BuildRunner<'_, '_>,
          event: Message,
      ) -> Result<(), ErrorToHandle> {
@@ -259,7 +153,7 @@ index a581e11..1b7b30b 100644
          match event {
              Message::Run(id, cmd) => {
                  build_runner
-@@ -627,10 +692,10 @@ impl<'gctx> DrainState<'gctx> {
+@@ -656,10 +692,10 @@ impl<'gctx> DrainState<'gctx> {
                  self.timings
                      .unit_start(build_runner, id, self.active[&id].clone());
              }
@@ -272,11 +166,8 @@ index a581e11..1b7b30b 100644
                  let mut shell = build_runner.bcx.gctx.shell();
                  shell.print_ansi_stderr(err.as_bytes())?;
                  shell.err().write_all(b"\n")?;
-@@ -678,34 +743,11 @@ impl<'gctx> DrainState<'gctx> {
-                     // from the `active` map ...
-                     Artifact::All => {
-                         trace!("end: {:?}", id);
-+                        self.paused.remove(&id);
+@@ -710,32 +746,8 @@ impl<'gctx> DrainState<'gctx> {
+                         self.paused.remove(&id);
                          self.finished += 1;
                          let unit = self.active.remove(&id).unwrap();
 -                        // An error could add an entry for a `Unit`
@@ -310,7 +201,7 @@ index a581e11..1b7b30b 100644
                          }
                          unit
                      }
-@@ -718,7 +760,12 @@ impl<'gctx> DrainState<'gctx> {
+@@ -748,7 +760,12 @@ impl<'gctx> DrainState<'gctx> {
                  };
                  debug!("end ({:?}): {:?}", unit, result);
                  match result {
@@ -324,26 +215,19 @@ index a581e11..1b7b30b 100644
                      Err(_) if build_runner.bcx.unit_can_fail_for_docscraping(&unit) => {
                          build_runner
                              .failed_scrape_units
-@@ -728,6 +775,7 @@ impl<'gctx> DrainState<'gctx> {
+@@ -756,8 +773,11 @@ impl<'gctx> DrainState<'gctx> {
+                             .unwrap()
+                             .insert(build_runner.files().metadata(&unit).unit_id());
                          self.queue.finish(&unit, &artifact);
++                        // Its dependents run as if it had succeeded.
++                        self.settle(build_runner, id, true);
                      }
                      Err(error) => {
 +                        self.settle(build_runner, id, false);
                          let show_warnings = true;
                          self.emit_log_messages(&unit, build_runner, show_warnings)?;
                          self.back_compat_notice(build_runner, &unit)?;
-@@ -762,11 +810,188 @@ impl<'gctx> DrainState<'gctx> {
-             Message::SectionTiming(id, section) => {
-                 self.timings.unit_section_timing(build_runner, id, &section);
-             }
-+            Message::Paused(id) => {
-+                self.paused.insert(id);
-+            }
-+            Message::Resumed(id) => {
-+                self.paused.remove(&id);
-+            }
-         }
- 
+@@ -803,6 +823,187 @@ impl<'gctx> DrainState<'gctx> {
          Ok(())
      }
  
@@ -411,13 +295,23 @@ index a581e11..1b7b30b 100644
 +            return Some(event);
 +        }
 +        match event {
-+            Message::Finish(id, _, result) => {
++            Message::Finish(id, _, mut result) => {
 +                // Free the job slot and unblock dependents now; only the
 +                // report waits.
 +                let unit = self.active.remove(&id).unwrap();
 +                self.paused.remove(&id);
 +                self.finished += 1;
-+                if result.is_ok() {
++                // As in `handle_event`: a scrape unit may fail, and its
++                // dependents still run.
++                if result.is_err() && build_runner.bcx.unit_can_fail_for_docscraping(&unit) {
++                    build_runner
++                        .failed_scrape_units
++                        .lock()
++                        .unwrap()
++                        .insert(build_runner.files().metadata(&unit).unit_id());
++                    self.queue.finish(&unit, &Artifact::All);
++                    result = Ok(());
++                } else if result.is_ok() {
 +                    if let Err(error) = self.finish(id, &unit, Artifact::All, build_runner) {
 +                        self.provisional.released_errors.push(error.into());
 +                    }
@@ -521,16 +415,7 @@ index a581e11..1b7b30b 100644
      // This will also tick the progress bar as appropriate
      fn wait_for_events(&mut self) -> Vec<Message> {
          // Drain all events at once to avoid displaying the progress bar
-@@ -779,7 +1004,7 @@ impl<'gctx> DrainState<'gctx> {
-         if events.is_empty() {
-             loop {
-                 self.tick_progress();
--                self.tokens.truncate(self.active.len() - 1);
-+                self.tokens.truncate(self.slot_holders().saturating_sub(1));
-                 match self.messages.pop(Duration::from_millis(500)) {
-                     Some(message) => {
-                         events.push(message);
-@@ -843,6 +1068,9 @@ impl<'gctx> DrainState<'gctx> {
+@@ -879,6 +1080,9 @@ impl<'gctx> DrainState<'gctx> {
                  if let Err(event_err) = self.handle_event(build_runner, event) {
                      self.handle_error(&mut build_runner.bcx.gctx.shell(), &mut errors, event_err);
                  }
@@ -540,7 +425,7 @@ index a581e11..1b7b30b 100644
              }
          }
          self.progress.clear();
-@@ -926,7 +1154,13 @@ impl<'gctx> DrainState<'gctx> {
+@@ -962,7 +1166,13 @@ impl<'gctx> DrainState<'gctx> {
          let new_err = new_err.into();
          if new_err.print_always || err_state.count == 0 {
              crate::display_error(&new_err.error, shell);
@@ -555,7 +440,7 @@ index a581e11..1b7b30b 100644
                  self.progress.indicate_error();
                  let _ = shell.warn("build failed, waiting for other jobs to finish...");
              }
-@@ -1003,6 +1237,22 @@ impl<'gctx> DrainState<'gctx> {
+@@ -1039,6 +1249,22 @@ impl<'gctx> DrainState<'gctx> {
          debug!("start {}: {:?}", id, unit);
  
          assert!(self.active.insert(id, unit.clone()).is_none());
@@ -578,7 +463,7 @@ index a581e11..1b7b30b 100644
  
          let messages = self.messages.clone();
          let is_fresh = job.freshness().is_fresh();
-@@ -1078,7 +1328,12 @@ impl<'gctx> DrainState<'gctx> {
+@@ -1114,7 +1340,12 @@ impl<'gctx> DrainState<'gctx> {
          let count = self.warning_count.entry(id).or_default();
          count.total += 1;
          if lint {
@@ -592,102 +477,68 @@ index a581e11..1b7b30b 100644
              // If this is an upstream dep but we *do* want warnings, make sure that they
              // don't fail compilation.
              if unit.is_local() {
-diff --git a/src/compiler/mod.rs b/src/compiler/mod.rs
-index fae7bab..838c33c 100644
---- a/src/compiler/mod.rs
-+++ b/src/compiler/mod.rs
-@@ -395,6 +395,8 @@ fn rustc(
-         output_options.show_diagnostics = false;
-     }
-     let env_config = Arc::clone(build_runner.bcx.gctx.env_config()?);
-+    let headstart = build_runner.headstart_enabled();
-+
-     return Ok(Work::new(move |state| {
-         // Artifacts are in a different location than typical units,
-         // hence we must assure the crate- and target-dependent
-@@ -452,6 +454,20 @@ fn rustc(
-             }
-         }
+diff --git a/tests/testsuite/headstart.rs b/tests/testsuite/headstart.rs
+index 0fab719..d610bb8 100644
+--- a/tests/testsuite/headstart.rs
++++ b/tests/testsuite/headstart.rs
+@@ -71,6 +71,57 @@ fn passes_early_metadata() {
+     assert_eq!(p.glob("target/debug/**/libdep-*.early-rmeta").count(), 1);
+ }
  
-+        // Headstart: dependents that started on this unit's early metadata
-+        // wait for its full metadata before code generation. If this unit
-+        // fails, its early metadata is withdrawn (deleted), which tells them
-+        // it won't come. rustc does this itself on errors; this covers crashes.
-+        let early_metadata: Vec<PathBuf> = if headstart {
-+            outputs
-+                .iter()
-+                .filter(|output| output.path.extension() == Some(OsStr::new("rmeta")))
-+                .map(|output| root.join(&output.path).with_extension("early-rmeta"))
-+                .collect()
-+        } else {
-+            Vec::new()
-+        };
++#[cargo_test(nightly, reason = "-Zearly-metadata is unstable")]
++fn dependency_error_drops_dependent_output() {
++    // `dep`'s interface is fine, so `app` can start on its early metadata
++    // before the error in `f`'s body is found. `app`'s warning must not be
++    // shown: without `-Zheadstart`, `app` would never have been compiled.
++    let p = dep_and_app(
++        r#"pub fn f() -> u32 { "not a number" }"#,
++        "fn main() { let unused = dep::f(); }",
++    );
 +
-         state.running(&rustc);
-         let timestamp = paths::set_invocation_time(&fingerprint_dir)?;
-         if let Some(sbom) = sbom {
-@@ -514,6 +530,12 @@ fn rustc(
-                 format!("could not compile {name}{errors}{warnings}")
-             });
- 
-+        if result.is_err() {
-+            for path in &early_metadata {
-+                let _ = paths::remove_file(path);
-+            }
-+        }
-+
-         if let Err(e) = result {
-             if let Some(diagnostic) = failed_scrape_diagnostic {
-                 state.warning(diagnostic);
-@@ -1346,6 +1368,12 @@ fn build_base_args(
-         }
-     }
- 
-+    // Headstart: rustc writes early metadata for dependents to start on, and
-+    // loads dependencies from theirs, waiting for full metadata before code
-+    // generation.
-+    if build_runner.headstart_enabled() {
-+        cmd.arg("-Zearly-metadata");
++    for command in ["check", "build"] {
++        p.cargo(command)
++            .arg("-Zheadstart")
++            .masquerade_as_nightly_cargo(&["headstart"])
++            .with_status(101)
++            .with_stderr_contains("[ERROR] could not compile `dep` (lib) due to 1 previous error")
++            .with_stderr_does_not_contain("[..]unused[..]")
++            .with_stderr_does_not_contain("[..]`app`[..]")
++            .run();
 +    }
-     if unit.mode.is_check() {
-         cmd.arg("--emit=dep-info,metadata");
-     } else if !build_runner
-@@ -2359,13 +2387,35 @@ fn on_stderr_line_inner(
-     struct ArtifactNotification<'a> {
-         #[serde(borrow)]
-         artifact: Cow<'a, str>,
-+        #[serde(borrow, default)]
-+        emit: Option<Cow<'a, str>>,
-     }
- 
-     if let Ok(artifact) = serde_json::from_str::<ArtifactNotification<'_>>(compiler_message.get()) {
-         trace!("found directive from rustc: `{}`", artifact.artifact);
--        if artifact.artifact.ends_with(".rmeta") {
--            debug!("looks like metadata finished early!");
--            state.rmeta_produced();
-+        match artifact.emit.as_deref() {
-+            // Headstart: early metadata (`-Zearly-metadata`) is enough for
-+            // dependents to start; full metadata follows.
-+            Some("early-metadata") => {
-+                debug!("early metadata written");
-+                state.rmeta_produced();
-+            }
-+            // Headstart: rustc paused before code generation or linking,
-+            // waiting for a dependency's full metadata or rlib. It doesn't
-+            // hold a job slot meanwhile.
-+            Some("wait-metadata") => {
-+                debug!("waiting for `{}`", artifact.artifact);
-+                state.paused();
-+            }
-+            Some("resume") => {
-+                debug!("resumed");
-+                state.resumed();
-+            }
-+            _ if artifact.artifact.ends_with(".rmeta") => {
-+                debug!("looks like metadata finished early!");
-+                state.rmeta_produced();
-+            }
-+            _ => {}
-         }
-         return Ok(false);
-     }
++}
++
++#[cargo_test(nightly, reason = "-Zearly-metadata is unstable")]
++fn dependent_output_released() {
++    // `app` may finish before `dep` does; its warnings, and then its errors,
++    // are held until `dep` succeeds, and then reported.
++    let p = dep_and_app(
++        "pub fn f() -> u32 { 1 }",
++        "fn main() { let unused = dep::f(); }",
++    );
++
++    p.cargo("check -Zheadstart")
++        .masquerade_as_nightly_cargo(&["headstart"])
++        .with_stderr_contains("[WARNING] unused variable: `unused`")
++        .with_stderr_contains("[WARNING] `app` (bin \"app\") generated 1 warning[..]")
++        .run();
++
++    p.change_file(
++        "app/src/main.rs",
++        "fn main() { let x: u32 = dep::f() == 1; }",
++    );
++    p.cargo("check -Zheadstart")
++        .masquerade_as_nightly_cargo(&["headstart"])
++        .with_status(101)
++        .with_stderr_contains("error[E0308]: mismatched types")
++        .with_stderr_contains(
++            "[ERROR] could not compile `app` (bin \"app\") due to 1 previous error",
++        )
++        .run();
++}
++
+ #[cargo_test(nightly, reason = "-Zearly-metadata is unstable")]
+ fn relinks_when_dependency_rlib_changes() {
+     // A binary starts on its dependencies' metadata, but links their rlibs: a
+-- 
+2.43.0
+

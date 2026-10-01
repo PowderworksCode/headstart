@@ -27,28 +27,37 @@ errors reported slightly later, and more memory in use at once (see
 
 ## Pieces
 
-- **rustc, `-Zearly-metadata`** ([patch](patches/rustc)):
+- **rustc, `-Zearly-metadata`** ([6 patches](patches/rustc)):
   - a new `analysis_interfaces` query splits analysis into item
     interfaces and function bodies;
   - the driver writes `.early-rmeta` between the two;
   - crate loading accepts early metadata, and swaps in full metadata
-    before code generation, pausing for it if necessary.
-- **cargo, `CARGO_HEADSTART=1`** ([patch](patches/cargo)):
+    before code generation, waiting for it if necessary on a lock its
+    producer holds until it's written.
+- **cargo, `-Zheadstart`** ([3 patches](patches/cargo)):
   - passes `-Zearly-metadata` to every compile;
   - starts dependents on the early-metadata notification, in both
     `check` and `build`;
-  - tells waiting dependents when a crate fails;
+  - gives a paused compilation's job slot to other work;
   - reports a crate's output only when its dependencies succeeded.
+
+The patches are a commit series, each with a commit message and tests,
+meant to become upstream pull requests: see
+[patches/README.md](patches/README.md).
 
 On rustc's default front end, headstart makes clean builds of 13 real
 projects (rust-analyzer, zed, bevy, lemmy, polars and others) up to 54%
 faster for `cargo check`, and up to 42% for `cargo build`. None is
 slower. With the parallel front end (`-Zthreads=8`), which covers some
-of the same ground, it adds up to 25%.
+of the same ground, it adds up to 25%. Those are 16-core numbers. The
+gain comes from cores the build would leave idle, so it shrinks on
+smaller machines. On 4 cores, rust-analyzer's check is 24% faster and
+its build 13–15%, and wide builds come out even.
 
 How it works, what early metadata leaves out, and the risks:
 [docs/design.md](docs/design.md). Measurements:
-[docs/results.md](docs/results.md).
+[docs/results.md](docs/results.md). Whether it's ready to bring to the
+compiler and cargo teams: [docs/readiness.md](docs/readiness.md).
 
 ## Try it
 
@@ -60,12 +69,12 @@ Then, in any Rust project:
 
 ```sh
 RUSTC=/path/to/headstart/rustc/build/host/stage1/bin/rustc \
-CARGO_HEADSTART=1 \
-  /path/to/headstart/cargo/target/release/cargo check   # or build
+  /path/to/headstart/cargo/target/release/cargo check -Zheadstart   # or build
 ```
 
-With `CARGO_HEADSTART` unset, the patched cargo behaves like upstream, so
-the same binaries give a fair baseline.
+`CARGO_UNSTABLE_HEADSTART=true` turns it on too, as does `[unstable]
+headstart = true` in `.cargo/config.toml`. Without it, the patched cargo
+behaves like upstream, so the same binaries give a fair baseline.
 
 `tests/smoke` is a two-crate workspace that shows the effect. Its `slow`
 library takes several seconds to check, almost all of it in function
@@ -110,6 +119,17 @@ at the commits measured, and prints them in that form:
 ```sh
 scripts/bench.sh -n 3 -c build $(scripts/real-projects.sh ~/hs-real)
 ```
+
+`-w` adds an untimed warm-up build per project, for build scripts that do
+one-time work outside `target` (helix compiles its grammars into its
+source tree).
+
+`scripts/bench-suite.sh <out-dir>` runs the whole suite of
+[docs/results.md](docs/results.md) on the current machine: rust-analyzer,
+the 21 rustc-perf benchmarks and the other real projects, check and build.
+It keeps each benchmark's results separately and skips finished ones, so
+it can be restarted, and writes a summary table at the end. It's how to
+get the numbers for a machine size not measured yet, such as 8 cores.
 
 `scripts/bench-mem.sh` samples the total memory of all rustc processes
 during a build, in the project directory itself (run it on an otherwise

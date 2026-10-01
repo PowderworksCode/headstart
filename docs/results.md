@@ -17,6 +17,10 @@ check-only version. They're kept for the error-delay, memory, clippy,
 rustdoc and incremental numbers, which haven't been measured again since;
 their timing tables are superseded by the current ones.
 
+"Reproduction on 4 cores" reruns most of it on a 4-core container, and
+"After rebasing onto current master" reruns that on the rebased
+patches. The sections after them are from the 16-core VM.
+
 ## Correctness (current version)
 
 - **Benchmark sweeps** (`scripts/sweep.sh`).
@@ -73,6 +77,261 @@ The sweeps found two bugs in the swap to full metadata, both fixed:
   it looked older than this compilation's early metadata. Writing early
   metadata now deletes the crate's stale full metadata and rlib first,
   so a full file next to early metadata is never an older one.
+
+## After rebasing onto current master: 4 cores
+
+Both patches rebased onto rust-lang/rust `6006fd0` and cargo `4f3fb24`
+(the masters of 2026-10-01, five days after the previous pins), then the
+whole 4-core set rerun on the same container. The patches applied without
+conflicts; only hunk offsets moved.
+
+### Correctness
+
+- **Sweeps** (`scripts/sweep.sh`, `-Zearly-metadata-verify`): `cargo
+  check` and `cargo build`, debug. 106 builds each; every benchmark
+  builds in both modes with identical diagnostics, and verify reports
+  nothing. stm32f4 fails in both modes as before. With headstart it
+  takes 6.4 s to fail instead of 1.2 s: more crates are already running
+  when its build script fails, and cargo waits for them. That's the
+  wasted work on failure that [design.md](design.md#risks) describes.
+- **`check-swap.sh`** passes at every opt-level.
+- **`check-errors.sh`:** all 12 scenarios are the same in both modes.
+- **`check-incremental.sh check` and `build`:** all 11 steps match.
+- **Freshness:** a binary is relinked after its dependency's rlib
+  changes, with headstart off and on.
+- **Test suites, with the patches applied and headstart off:**
+  - rustc's UI suite: 22170 passed, 0 failed, 262 ignored.
+  - cargo's testsuite, filtered to freshness, fingerprint, build_script,
+    pipelining, rebuild and docscrape tests, with
+    `CFG_DISABLE_CROSS_TESTS=1`: 337 passed, 0 failed.
+
+### rust-analyzer, 5 runs
+
+| | today | headstart | saved | today range | headstart range | before rebase |
+|---|--:|--:|--:|--:|--:|--:|
+| `cargo check` | 96.10 s | 72.93 s | 24% | 95.69–96.79 | 72.39–73.51 | 24% |
+| `cargo build` | 161.75 s | 140.33 s | 13% | 159.25–168.52 | 138.13–142.87 | 15% |
+
+The absolute times are 10–30% higher than before the rebase, because the
+container's host was slower that day: rust-analyzer's check went from
+86 s to 96 s, and lldap's build from 155 s to 204 s, off and on alike.
+The savings are what compare.
+
+### rustc-perf, 21 benchmarks, 3 runs
+
+Same sources as before (copied out of the rustc-perf submodule at
+`94df17b`). `*`: the off and on ranges overlap.
+
+| benchmark | build today | build headstart | saved | before rebase | check today | check headstart | saved | before rebase |
+|---|--:|--:|--:|--:|--:|--:|--:|--:|
+| tt-muncher | 2.43 s | 1.53 s | 37% | 33% | 1.68 s | 1.20 s | 29% | 28% |
+| serde_derive-1.0.219 | 8.90 s | 5.88 s | 34% | 32% | 5.31 s | 3.49 s | 34% | 34% |
+| clap_derive-4.5.32 | 8.63 s | 5.77 s | 33% | 28% | 5.30 s | 3.54 s | 33% | 32% |
+| hyper-1.6.0 | 2.79 s | 2.11 s | 24% | 21% | 2.26 s | 2.05 s | 9% | 22% |
+| html5ever | 16.53 s | 12.58 s | 24% | 26% | 16.29 s | 11.59 s | 29% | 26% |
+| unicode-normalization-0.1.24 | 2.14 s | 1.69 s | 21%* | 31% | 1.76 s | 1.16 s | 34% | 35% |
+| wg-grammar | 9.86 s | 7.79 s | 21% | 21% | 9.63 s | 7.68 s | 20% | 22% |
+| nalgebra-0.33.0 | 23.35 s | 18.98 s | 19% | 18% | 21.28 s | 17.98 s | 16% | 18% |
+| regex-automata-0.4.8 | 10.66 s | 8.89 s | 17% | 16% | 6.79 s | 5.49 s | 19% | 19% |
+| cranelift-codegen-0.119.0 | 40.66 s | 34.49 s | 15%* | 5% | 21.14 s | 22.39 s | −6%* | 5% |
+| projection-caching | 10.76 s | 9.28 s | 14% | 9% | 11.35 s | 11.03 s | 3%* | 14% |
+| ripgrep-14.1.1 | 16.90 s | 14.66 s | 13% | 12% | 9.47 s | 7.08 s | 25% | 21% |
+| image-0.25.6 | 30.39 s | 26.69 s | 12% | 14% | 20.43 s | 16.51 s | 19% | 13% |
+| syn-2.0.101 | 5.63 s | 5.06 s | 10% | 12% | 4.71 s | 5.38 s | −14%* | 10% |
+| piston-image | 10.42 s | 9.39 s | 10% | 10% | 6.91 s | 5.77 s | 16% | 13% |
+| eza-0.21.2 | 50.36 s | 45.69 s | 9% | 10% | 40.43 s | 38.34 s | 5% | 5% |
+| diesel-2.2.10 | 38.79 s | 35.60 s | 8% | 9% | 38.28 s | 36.12 s | 6%* | 8% |
+| cargo-0.87.1 | 172.73 s | 161.63 s | 6%* | 3% | 97.54 s | 93.23 s | 4% | 5% |
+| html5ever-0.31.0 | 9.24 s | 8.66 s | 6% | 9% | 9.14 s | 8.45 s | 8%* | 7% |
+| cargo | 87.37 s | 83.91 s | 4% | 8% | 71.89 s | 68.14 s | 5%* | 8% |
+| encoding | 1.90 s | 1.87 s | 2%* | 1% | 1.30 s | 1.25 s | 4%* | 15% |
+
+- **Build:** all 21 are faster (2–37%), within a few points of before
+  the rebase.
+- **Check:** in 3 runs, 19 of 21 are faster.
+  - syn (−14%) and cranelift-codegen (−6%) aren't.
+  - hyper, projection-caching and encoding gained less than before.
+  - Their runs scattered widely: syn's took 3.9–6.2 s, where before they
+    spanned 0.15 s, and its fastest run was with headstart.
+
+  A 5-run re-time of the five weakest check results puts them back in
+  line with before:
+
+  | benchmark | 3 runs | 5 runs | 5-run ranges, off / on | before rebase |
+  |---|--:|--:|--:|--:|
+  | hyper-1.6.0 | 9% | 20% | 2.26–2.47 / 1.73–1.93 s | 22% |
+  | syn-2.0.101 | −14% | 15% | 3.66–3.94 / 3.03–3.28 s | 10% |
+  | projection-caching | 3% | 14% | 10.53–11.67 / 9.16–9.62 s | 14% |
+  | encoding | 4% | 4% | 1.24–1.38 / 1.21–1.32 s | 15% |
+  | cranelift-codegen-0.119.0 | −6% | 2% | 20.91–22.40 / 19.86–22.09 s | 5% |
+
+### Real projects, 3 runs, with a warm-up build
+
+| project | check today | check headstart | saved | before rebase | build today | build headstart | saved | before rebase |
+|---|--:|--:|--:|--:|--:|--:|--:|--:|
+| helix | 88.4 s | 69.5 s | 21% | 17% | 142.3 s | 128.1 s | 10% | 11% |
+| wasmtime | 192.8 s | 163.9 s | 15% | 16% | 323.1 s | 309.5 s | 4% | 5% |
+| typst | 177.1 s | 169.8 s | 4%* | 4% | 486.0 s | 506.2 s | −4%* | 1% |
+| lldap | 120.5 s | 120.6 s | 0%* | 0% | 204.1 s | 199.4 s | 2%* | 0% |
+| bevy | 162.9 s | 164.5 s | −1%* | −1% | 359.3 s | 365.9 s | −2%* | 0% |
+
+`*`: the off and on ranges overlap.
+
+- **The same as before the rebase,** within the run-to-run noise:
+  - helix and wasmtime gain in check and build, with separated ranges;
+  - typst, lldap and bevy are within noise of even.
+- **typst's build (−4%)** is one slow run. In run 2, the headstart build's
+  compilations used 14% more CPU time (2,264 s, paused time excluded)
+  than the same compilations in run 1 (1,985 s). The other two pairs are
+  even: 482 vs 482 s, and 508 vs 506 s.
+- **The cost on a saturated machine.** With headstart, the same builds
+  spend more rustc CPU time:
+  - typst's build: 5–7% more, from the early write and from more
+    compilations competing for cache and memory bandwidth;
+  - bevy's build: about 3% more.
+
+  With no idle core to win back, that's what keeps typst, lldap and bevy
+  at even, or slightly behind (bevy's build: −2%, overlapping ranges).
+
+## Reproduction on 4 cores: Claude Code container, 4 jobs
+
+A rerun of the benchmarks on a much smaller machine than the 16-core VM
+below, to check that the results reproduce and to see what a
+laptop-sized machine gets (open work item "Fewer cores").
+
+- **Machine:** a Claude Code cloud container, Intel Xeon @ 2.1 GHz, 4
+  cores, 15 GB RAM, ~30 GB of disk. `-j 4` throughout.
+- **Build:** the same patches and `config/bootstrap.toml`, except
+  `incremental = false` for the compiler's own build, to save disk. Both
+  modes use the same compiler, so this doesn't affect the comparison.
+- **Load:** the container is shared-tenancy, and it restarted twice
+  during the session. After the second restart the same builds ran about
+  20% slower (lldap took 110 s where it had taken 90 s), while the saved
+  percentages stayed put (helix 18% before, 17% after). Every table
+  compares off and on runs from the same session, alternating, never
+  across a restart.
+- **Discarded runs:** the first real-project pass, cut short by a
+  restart; it had no warm-up, and a stray process skewed one lldap run.
+  The tables come from a full rerun.
+- **Result:**
+  - Every build succeeded once bevy's system libraries were installed,
+    with identical diagnostics in both modes.
+  - Nothing is meaningfully slower. The worst result is bevy's check at
+    −1%, within noise.
+
+### Correctness
+
+- **`scripts/check-swap.sh`** passes at every opt-level.
+- **`scripts/check-errors.sh`** reports all 12 scenarios the same in both
+  modes.
+- **With the two cargo fixes** from [readiness.md](readiness.md#fixed-in-this-round):
+  - `check-errors.sh` passes again, and so do
+    `check-incremental.sh check` and `check-incremental.sh build`.
+  - The cargo testsuite tests for freshness, fingerprints, build scripts,
+    pipelining, rebuilds and docscrape pass: 336 passed. The one failure
+    needs an i686 cross target the container doesn't have.
+
+### rust-analyzer, 5 runs
+
+| | today | headstart | saved | today range | headstart range | 16-core VM |
+|---|--:|--:|--:|--:|--:|--:|
+| `cargo check` | 86.18 s | 65.36 s | 24% | 84.32–86.83 | 64.66–66.35 | 54% |
+| `cargo build` | 146.70 s | 125.34 s | 15% | 145.76–147.50 | 122.87–125.58 | 42% |
+
+The ranges don't overlap. The smaller saving is the core count, not
+headstart:
+
+- **Check.** Without headstart, 2.7 compilations run on average, out of
+  4 slots; with it, 3.8. The build is about 230 s of rustc work, so no
+  schedule on 4 cores can finish in under ~57 s. Headstart gets 65 s,
+  about 70% of the most that can be saved here.
+- **Build.** 2.8 running without headstart, 3.6 with it (paused
+  compilations excluded; they spent 95 s paused, holding no slot). About
+  415 s of rustc work, so the floor is ~104 s; headstart gets 125 s.
+- **On 16 cores,** the same work has a floor of ~14 s for check, and
+  the build without headstart is bound by the crate chain instead, which
+  is what headstart shortens. That's the room the 54% came from.
+
+### rustc-perf, 21 benchmarks, 3 runs
+
+Sorted by the `cargo build` saving. The VM columns are from "Timing,
+current version" below.
+
+| benchmark | build today | build headstart | saved | 16-core VM | check today | check headstart | saved | 16-core VM |
+|---|--:|--:|--:|--:|--:|--:|--:|--:|
+| tt-muncher | 2.01 s | 1.35 s | 33% | 32% | 1.47 s | 1.06 s | 28% | 28% |
+| serde_derive-1.0.219 | 7.50 s | 5.12 s | 32% | 37% | 4.88 s | 3.22 s | 34% | 36% |
+| unicode-normalization-0.1.24 | 1.77 s | 1.22 s | 31% | 24% | 1.57 s | 1.02 s | 35% | 31% |
+| clap_derive-4.5.32 | 7.22 s | 5.20 s | 28% | 27% | 4.72 s | 3.22 s | 32% | 30% |
+| html5ever | 14.49 s | 10.72 s | 26% | 27% | 14.10 s | 10.47 s | 26% | 27% |
+| hyper-1.6.0 | 2.38 s | 1.87 s | 21% | 24% | 2.01 s | 1.57 s | 22% | 24% |
+| wg-grammar | 8.99 s | 7.14 s | 21% | 22% | 8.67 s | 6.80 s | 22% | 19% |
+| nalgebra-0.33.0 | 20.88 s | 17.16 s | 18% | 23% | 19.23 s | 15.73 s | 18% | 22% |
+| regex-automata-0.4.8 | 9.58 s | 8.06 s | 16% | 22% | 6.40 s | 5.16 s | 19% | 22% |
+| image-0.25.6 | 26.59 s | 22.98 s | 14% | 22% | 17.88 s | 15.47 s | 13% | 28% |
+| ripgrep-14.1.1 | 14.35 s | 12.58 s | 12% | 34% | 8.48 s | 6.72 s | 21% | 46% |
+| syn-2.0.101 | 4.88 s | 4.31 s | 12% | 14% | 3.14 s | 2.83 s | 10% | 13% |
+| piston-image | 9.43 s | 8.47 s | 10% | 31% | 5.93 s | 5.14 s | 13% | 35% |
+| eza-0.21.2 | 45.47 s | 41.08 s | 10% | 35% | 36.29 s | 34.31 s | 5% | 30% |
+| html5ever-0.31.0 | 8.18 s | 7.41 s | 9% | 18% | 7.42 s | 6.92 s | 7% | 15% |
+| diesel-2.2.10 | 32.86 s | 29.80 s | 9% | 9% | 31.97 s | 29.41 s | 8% | 9% |
+| projection-caching | 9.23 s | 8.43 s | 9% | 13% | 9.25 s | 7.93 s | 14% | 15% |
+| cargo | 73.12 s | 67.33 s | 8% | 16% | 61.54 s | 56.81 s | 8% | 18% |
+| cranelift-codegen-0.119.0 | 27.22 s | 25.76 s | 5% | 8% | 18.08 s | 17.24 s | 5% | 9% |
+| cargo-0.87.1 | 152.19 s | 147.16 s | 3% | 13% | 85.82 s | 81.95 s | 5% | 19% |
+| encoding | 1.45 s | 1.43 s | 1% | 6% | 1.23 s | 1.05 s | 15% | 5% |
+
+- **Chain-shaped builds reproduce almost exactly:** tt-muncher,
+  serde_derive, clap_derive, html5ever, hyper, wg-grammar and diesel are
+  within a few points of the 16-core numbers. They never had more than a
+  few crates ready at once, so 4 cores is enough to run them.
+- **Wide builds lose most of their gain:** ripgrep (46% → 21% for
+  check), eza (30% → 5%), piston-image and cargo-0.87.1. Headstart makes
+  more crates ready at once, and on 4 cores there's nowhere to run them.
+- **Ranges.** For check, every headstart run was faster than every
+  run without it on 20 of the 21; encoding's ranges overlap on a 1-second
+  build.
+
+### Real projects, 3 runs
+
+Each project gets one untimed warm-up build first (`bench.sh -w`), then
+alternating runs. helix's build script compiles its tree-sitter grammars
+into the source tree on the first build, which took 185 s instead of
+57 s; without the warm-up, that lands on the first run, which is always
+headstart off. The VM runs had no warm-up, so helix's VM numbers include
+that cost in its first off run (the median of 3 limits the effect).
+
+| project | check today | check headstart | saved | 16-core VM | build today | build headstart | saved | 16-core VM |
+|---|--:|--:|--:|--:|--:|--:|--:|--:|
+| rust-analyzer | 86.2 s | 65.4 s | 24% | 54% | 146.7 s | 125.3 s | 15% | 42% |
+| helix | 74.1 s | 61.4 s | 17% | 31% | 124.4 s | 111.2 s | 11% | 17% |
+| wasmtime | 173.4 s | 145.9 s | 16% | 47% | 280.2 s | 265.5 s | 5% | 36% |
+| typst | 160.2 s | 154.2 s | 4% | 26% | 422.1 s | 419.5 s | 1% | 13% |
+| lldap | 109.6 s | 109.5 s | 0% | 18% | 154.6 s | 154.6 s | 0% | 23% |
+| bevy | 146.7 s | 148.6 s | −1% | 29% | 307.0 s | 308.0 s | 0% | 30% |
+
+rust-analyzer is the 5-run measurement above.
+
+- **Where cores were idle, it still pays.** On rust-analyzer, helix and
+  wasmtime, in both check and build, every run with headstart beat every
+  run without it.
+- **Where 4 cores are already full, there's nothing to fill.** Without
+  headstart, bevy's build already keeps 3.76 of 4 compilations running;
+  lldap's check 3.0 (plus C build scripts); typst builds its dependencies
+  at opt-level 2, so code generation dominates. These are even:
+  - Overlapping ranges: bevy's check (−1%; 144.9–149.1 s off, 146.4–149.3 s
+    on) and build (0.3% slower), lldap's check and build, and typst's build;
+  - bevy's build with headstart spent about 3% more rustc time (the early
+    write, and more compilations competing for the same cores), which is
+    the cost that shows when there's no idle core to win back.
+
+  That's the saturated case of open work item 1, measured.
+- **Not measured here:** polars, zed and lemmy need tens of GB for a
+  debug build, more than the container's disk. nushell, vaultwarden,
+  atuin and zola weren't attempted, for time.
+- **A bevy run that failed in both modes** (missing system libraries,
+  before they were installed) reported the same error in both, differing
+  only in the panicking thread's ID.
 
 ## Timing, current version: Linux, AMD EPYC 9554P, 16 jobs, 5 runs
 

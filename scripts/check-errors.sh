@@ -19,7 +19,7 @@ for scenario in "" "--features slow/broken" "--features app/broken"; do
   for mode in 0 1; do
     for format in human json; do
       rm -rf target
-      CARGO_HEADSTART=$mode "$cargo" $command --color never --message-format "$format" $scenario \
+      CARGO_UNSTABLE_HEADSTART=$([ $mode = 1 ] && echo true || echo false) "$cargo" $command --color never --message-format "$format" $scenario \
         >"$tmp/$format.$mode.out" 2>"$tmp/$format.$mode.err"
       echo "exit $?" >>"$tmp/$format.$mode.out"
       if [ -x target/debug/app ]; then target/debug/app >>"$tmp/$format.$mode.out" 2>&1; fi

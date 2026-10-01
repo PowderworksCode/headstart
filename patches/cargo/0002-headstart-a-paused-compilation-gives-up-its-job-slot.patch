@@ -1,0 +1,189 @@
+From 9986f47429460c5b2ea702984b89e54cff953c4b Mon Sep 17 00:00:00 2001
+From: Zack Maril <zmaril@users.noreply.github.com>
+Date: Thu, 1 Oct 2026 16:47:19 +0000
+Subject: [PATCH 2/3] headstart: a paused compilation gives up its job slot
+
+With `-Zearly-metadata`, rustc announces when it pauses, waiting for a
+dependency's full metadata or rlib (`wait-metadata`), and when it
+continues (`resume`). A paused unit no longer counts as running, so its
+job slot goes to other work.
+
+A resumed unit counts as running again at once, without waiting for a
+free slot: waiting for one starved it, since work started in its place
+held the slots, often while it was on the critical path. Cargo starts no
+new work until the number of running units is back under the limit, so
+the build can briefly run one unit over it.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_011C4oUhyTKGLkWYDeejZv2e
+---
+ doc/book/src/reference/unstable.md  |  4 +++-
+ src/compiler/job_queue/job_state.rs | 11 +++++++++++
+ src/compiler/job_queue/mod.rs       | 30 +++++++++++++++++++++++++++--
+ src/compiler/mod.rs                 | 14 +++++++++++---
+ tests/testsuite/headstart.rs        |  3 ++-
+ 5 files changed, 55 insertions(+), 7 deletions(-)
+
+diff --git a/doc/book/src/reference/unstable.md b/doc/book/src/reference/unstable.md
+index 557bf3f..c701cfb 100644
+--- a/doc/book/src/reference/unstable.md
++++ b/doc/book/src/reference/unstable.md
+@@ -2078,7 +2078,9 @@ passes to every compilation:
+   and `cargo test`, including binaries, tests, proc macros and build scripts.
+ * A dependent does all its analysis against early metadata. Before code
+   generation, rustc swaps in the dependency's full metadata, and before linking
+-  it waits for the dependency's rlib.
++  it waits for the dependency's rlib. While it waits, it announces
++  `wait-metadata`, and Cargo gives its job slot to other work until it
++  announces `resume`.
+ 
+ ```toml
+ [unstable]
+diff --git a/src/compiler/job_queue/job_state.rs b/src/compiler/job_queue/job_state.rs
+index 0f5e4fb..a686276 100644
+--- a/src/compiler/job_queue/job_state.rs
++++ b/src/compiler/job_queue/job_state.rs
+@@ -148,6 +148,17 @@ impl<'a, 'gctx> JobState<'a, 'gctx> {
+         });
+     }
+ 
++    /// Headstart: rustc paused, waiting for a dependency's full metadata or
++    /// rlib.
++    pub fn paused(&self) {
++        self.messages.push(Message::Paused(self.id));
++    }
++
++    /// Headstart: a paused rustc resumed.
++    pub fn resumed(&self) {
++        self.messages.push(Message::Resumed(self.id));
++    }
++
+     /// A method used to signal to the coordinator thread that the rmeta file
+     /// for an rlib has been produced. This is only called for some rmeta
+     /// builds when required, and can be called at any time before a job ends.
+diff --git a/src/compiler/job_queue/mod.rs b/src/compiler/job_queue/mod.rs
+index e28ce7e..67b6ea3 100644
+--- a/src/compiler/job_queue/mod.rs
++++ b/src/compiler/job_queue/mod.rs
+@@ -210,6 +210,13 @@ struct DrainState<'gctx> {
+     /// How many jobs we've finished
+     finished: usize,
+     per_package_future_incompat_reports: Vec<FutureIncompatReportPackage>,
++
++    /// Headstart: jobs paused, waiting for a dependency's full metadata or
++    /// rlib. They don't hold a job slot, so theirs goes to other work. A
++    /// paused job resumes as soon as its file is written, without waiting for
++    /// a slot, so it can't be starved by work started in its place; it counts
++    /// as running again, and no new job starts until enough jobs finish.
++    paused: HashSet<JobId>,
+ }
+ 
+ /// Count of warnings, used to print a summary after the job succeeds
+@@ -389,6 +396,12 @@ enum Message {
+     Finish(JobId, Artifact, CargoResult<()>),
+     FutureIncompatReport(JobId, Vec<FutureBreakageItem>),
+     SectionTiming(JobId, SectionTiming),
++
++    /// Headstart: rustc paused, waiting for a dependency's full metadata or
++    /// rlib.
++    Paused(JobId),
++    /// Headstart: a paused rustc resumed.
++    Resumed(JobId),
+     UnusedExterns(JobId, std::collections::BTreeSet<InternedString>),
+ }
+ 
+@@ -533,6 +546,7 @@ impl<'gctx> JobQueue<'gctx> {
+             ),
+             finished: 0,
+             per_package_future_incompat_reports: Vec::new(),
++            paused: HashSet::default(),
+         };
+ 
+         // Create a helper thread for acquiring jobserver tokens
+@@ -617,8 +631,13 @@ impl<'gctx> DrainState<'gctx> {
+         Ok(())
+     }
+ 
++    /// Jobs holding a job slot: active ones, minus paused ones (headstart).
++    fn slot_holders(&self) -> usize {
++        self.active.len().saturating_sub(self.paused.len())
++    }
++
+     fn has_extra_tokens(&self) -> bool {
+-        self.active.len() < self.tokens.len() + 1
++        self.slot_holders() < self.tokens.len() + 1
+     }
+ 
+     fn handle_event(
+@@ -688,6 +707,7 @@ impl<'gctx> DrainState<'gctx> {
+                     // from the `active` map ...
+                     Artifact::All => {
+                         trace!("end: {:?}", id);
++                        self.paused.remove(&id);
+                         self.finished += 1;
+                         let unit = self.active.remove(&id).unwrap();
+                         // An error could add an entry for a `Unit`
+@@ -772,6 +792,12 @@ impl<'gctx> DrainState<'gctx> {
+             Message::SectionTiming(id, section) => {
+                 self.timings.unit_section_timing(build_runner, id, &section);
+             }
++            Message::Paused(id) => {
++                self.paused.insert(id);
++            }
++            Message::Resumed(id) => {
++                self.paused.remove(&id);
++            }
+         }
+ 
+         Ok(())
+@@ -789,7 +815,7 @@ impl<'gctx> DrainState<'gctx> {
+         if events.is_empty() {
+             loop {
+                 self.tick_progress();
+-                self.tokens.truncate(self.active.len() - 1);
++                self.tokens.truncate(self.slot_holders().saturating_sub(1));
+                 match self.messages.pop(Duration::from_millis(500)) {
+                     Some(message) => {
+                         events.push(message);
+diff --git a/src/compiler/mod.rs b/src/compiler/mod.rs
+index f2fbf91..9983a55 100644
+--- a/src/compiler/mod.rs
++++ b/src/compiler/mod.rs
+@@ -2378,9 +2378,17 @@ fn on_stderr_line_inner(
+                 debug!("early metadata written");
+                 state.rmeta_produced();
+             }
+-            // Headstart: rustc waiting for a dependency's full metadata or
+-            // rlib, and continuing; not this unit's metadata.
+-            Some("wait-metadata" | "resume") => {}
++            // Headstart: rustc paused before code generation or linking,
++            // waiting for a dependency's full metadata or rlib. It doesn't
++            // hold a job slot meanwhile.
++            Some("wait-metadata") => {
++                debug!("waiting for `{}`", artifact.artifact);
++                state.paused();
++            }
++            Some("resume") => {
++                debug!("resumed");
++                state.resumed();
++            }
+             _ if artifact.artifact.ends_with(".rmeta") => {
+                 debug!("looks like metadata finished early!");
+                 state.rmeta_produced();
+diff --git a/tests/testsuite/headstart.rs b/tests/testsuite/headstart.rs
+index 2203f72..0fab719 100644
+--- a/tests/testsuite/headstart.rs
++++ b/tests/testsuite/headstart.rs
+@@ -97,7 +97,8 @@ fn relinks_when_dependency_rlib_changes() {
+ #[cargo_test(nightly, reason = "-Zearly-metadata is unstable")]
+ fn all_unit_kinds_one_job() {
+     // A build script, a proc macro, a library, a binary and an integration
+-    // test, all started on early metadata where they can be.
++    // test, all started on early metadata where they can be. With one job, a
++    // unit paused for a dependency's full metadata must give up its slot.
+     let p = project()
+         .file(
+             "Cargo.toml",
+-- 
+2.43.0
+
