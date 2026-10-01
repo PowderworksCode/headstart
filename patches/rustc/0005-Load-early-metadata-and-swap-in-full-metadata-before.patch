@@ -1,6 +1,6 @@
-From 7036a2963dee58ddb5858b2f878e52ad05a9bab6 Mon Sep 17 00:00:00 2001
+From 0ed8fed422126685bdb5f80e290dd4cc12005f71 Mon Sep 17 00:00:00 2001
 From: Zack Maril <zmaril@users.noreply.github.com>
-Date: Thu, 1 Oct 2026 16:35:50 +0000
+Date: Thu, 1 Oct 2026 17:49:56 +0000
 Subject: [PATCH 5/6] Load early metadata, and swap in full metadata before
  codegen
 
@@ -10,8 +10,10 @@ early metadata while that dependency is still checking its bodies:
 - The locator also considers `libfoo-hash.early-rmeta`, for `--extern`
   and when searching directories, and loads the full metadata instead if
   it exists. Writing early metadata deletes stale full metadata, so a full
-  file next to early metadata is never older. A crate that links records
-  where the dependency's rlib will be.
+  file next to early metadata is never older. A crate that links, given a
+  dependency's metadata, records the rlib next to it if the dependency is
+  still compiling (it holds the rlib's lock) or the rlib is already there;
+  otherwise a missing rlib is reported as before.
 - Before code generation, `CStore::load_full_metadata` replaces every
   dependency loaded from early metadata with its full metadata, checking
   the crate hash. The early `CrateMetadata` stays alive, so whatever was
@@ -41,23 +43,23 @@ Claude-Session: https://claude.ai/code/session_011C4oUhyTKGLkWYDeejZv2e
  compiler/rustc_interface/src/passes.rs       |  17 ++
  compiler/rustc_interface/src/queries.rs      |  11 ++
  compiler/rustc_metadata/src/creader.rs       | 159 ++++++++++++++++++-
- compiler/rustc_metadata/src/locator.rs       |  91 ++++++++++-
+ compiler/rustc_metadata/src/locator.rs       |  99 +++++++++++-
  compiler/rustc_metadata/src/rmeta/decoder.rs |  49 ++++++
  tests/run-make/early-metadata/dep.rs         |  16 ++
  tests/run-make/early-metadata/main.rs        |   3 +
  tests/run-make/early-metadata/mid.rs         |  20 +++
- tests/run-make/early-metadata/rmake.rs       | 120 ++++++++++++++
- 9 files changed, 478 insertions(+), 8 deletions(-)
+ tests/run-make/early-metadata/rmake.rs       | 125 +++++++++++++++
+ 9 files changed, 491 insertions(+), 8 deletions(-)
  create mode 100644 tests/run-make/early-metadata/dep.rs
  create mode 100644 tests/run-make/early-metadata/main.rs
  create mode 100644 tests/run-make/early-metadata/mid.rs
  create mode 100644 tests/run-make/early-metadata/rmake.rs
 
 diff --git a/compiler/rustc_interface/src/passes.rs b/compiler/rustc_interface/src/passes.rs
-index ea09bdc83..605d5203d 100644
+index 210c15baa..52839971c 100644
 --- a/compiler/rustc_interface/src/passes.rs
 +++ b/compiler/rustc_interface/src/passes.rs
-@@ -1408,6 +1408,23 @@ pub(crate) fn start_codegen<'tcx>(
+@@ -1424,6 +1424,23 @@ pub(crate) fn start_codegen<'tcx>(
  
      info!("Pre-codegen\n{:?}", tcx.debug_stats());
  
@@ -82,7 +84,7 @@ index ea09bdc83..605d5203d 100644
          Ok(metadata) => metadata,
          Err(guar) => guar.raise_fatal(),
 diff --git a/compiler/rustc_interface/src/queries.rs b/compiler/rustc_interface/src/queries.rs
-index 9b67cb5b8..12f0f9ae6 100644
+index 9b67cb5b8..2d234b393 100644
 --- a/compiler/rustc_interface/src/queries.rs
 +++ b/compiler/rustc_interface/src/queries.rs
 @@ -166,6 +166,17 @@ pub fn link(
@@ -90,7 +92,7 @@ index 9b67cb5b8..12f0f9ae6 100644
          }
  
 +        // `-Zearly-metadata`: dependencies' rlibs may still be being written.
-+        if sess.opts.unstable_opts.early_metadata {
++        if sess.opts.unstable_opts.early_metadata && sess.opts.output_types.should_link() {
 +            rustc_metadata::creader::CStore::wait_for_rlibs(
 +                sess,
 +                self.crate_info
@@ -297,7 +299,7 @@ index 10693448e..561560c47 100644
 +    }
 +}
 diff --git a/compiler/rustc_metadata/src/locator.rs b/compiler/rustc_metadata/src/locator.rs
-index 38da6561e..a5bc2c4e1 100644
+index 38da6561e..f97f78597 100644
 --- a/compiler/rustc_metadata/src/locator.rs
 +++ b/compiler/rustc_metadata/src/locator.rs
 @@ -237,6 +237,7 @@
@@ -374,14 +376,17 @@ index 38da6561e..a5bc2c4e1 100644
          // Order here matters, rmeta should come first.
          //
          // Make sure there's at most one rlib and at most one dylib.
-@@ -543,10 +575,38 @@ fn extract_lib(
+@@ -543,10 +575,46 @@ fn extract_lib(
              return Err(CrateError::FullMetadataNotFound(self.crate_name, CrateFlavor::SDylib));
          }
  
-+        // `-Zearly-metadata`: a crate that links, started on a dependency's
-+        // metadata, links against its rlib next to it, which may not be
-+        // written yet. It waits for it before linking (see
-+        // `CStore::wait_for_rlibs`).
++        // `-Zearly-metadata`: a crate that links, given a dependency's
++        // metadata, links against its rlib next to it. If the dependency is
++        // still compiling, it holds the rlib's lock, and the crate waits for
++        // the rlib before linking (see `CStore::wait_for_rlibs`); if it's
++        // done, the rlib is there. (The lock is checked first: it's released
++        // after the rlib is written.) Otherwise there's no rlib coming, and
++        // the crate is reported as missing one, as usual.
 +        let rlib = match (&rlib, &dylib, &rmeta) {
 +            (None, None, Some(rmeta))
 +                if self.accept_early_metadata
@@ -393,7 +398,12 @@ index 38da6561e..a5bc2c4e1 100644
 +                } else {
 +                    rmeta.clone()
 +                };
-+                Some(full.with_extension("rlib"))
++                let pending = full.with_extension("rlib");
++                if crate::fs::output_lock_path(&pending).exists() || pending.exists() {
++                    Some(pending)
++                } else {
++                    None
++                }
 +            }
 +            _ => rlib,
 +        };
@@ -413,7 +423,7 @@ index 38da6561e..a5bc2c4e1 100644
      fn needs_crate_flavor(&self, flavor: CrateFlavor) -> bool {
          if flavor == CrateFlavor::Dylib && self.is_proc_macro {
              return true;
-@@ -752,6 +812,19 @@ fn find_commandline_library(
+@@ -752,6 +820,19 @@ fn find_commandline_library(
          let mut dylibs = FxIndexSet::default();
          let mut sdylib_interfaces = FxIndexSet::default();
          for loc in &self.exact_paths {
@@ -433,7 +443,7 @@ index 38da6561e..a5bc2c4e1 100644
              let loc_canon = loc.canonicalized();
              let loc_orig = loc.original();
              if !loc_canon.exists() {
-@@ -774,7 +847,7 @@ fn find_commandline_library(
+@@ -774,7 +855,7 @@ fn find_commandline_library(
                      rlibs.insert(loc_canon.clone());
                      continue;
                  }
@@ -442,7 +452,7 @@ index 38da6561e..a5bc2c4e1 100644
                      rmetas.insert(loc_canon.clone());
                      continue;
                  }
-@@ -814,7 +887,7 @@ pub(crate) fn into_error(
+@@ -814,7 +895,7 @@ pub(crate) fn into_error(
      }
  }
  
@@ -451,7 +461,7 @@ index 38da6561e..a5bc2c4e1 100644
      target: &Target,
      flavor: CrateFlavor,
      filename: &'p Path,
-@@ -973,13 +1046,23 @@ fn get_flavor_from_path(path: &Path) -> CrateFlavor {
+@@ -973,13 +1054,23 @@ fn get_flavor_from_path(path: &Path) -> CrateFlavor {
  
      if filename.ends_with(".rlib") {
          CrateFlavor::Rlib
@@ -609,10 +619,10 @@ index 000000000..fb13563dd
 +}
 diff --git a/tests/run-make/early-metadata/rmake.rs b/tests/run-make/early-metadata/rmake.rs
 new file mode 100644
-index 000000000..8208f3783
+index 000000000..a5e351fc8
 --- /dev/null
 +++ b/tests/run-make/early-metadata/rmake.rs
-@@ -0,0 +1,120 @@
+@@ -0,0 +1,125 @@
 +//! `-Zearly-metadata`: a crate that depends on another can start compiling on
 +//! its early metadata (`.early-rmeta`), written before the dependency's
 +//! function bodies are checked. Before code generation, it waits for the
@@ -715,6 +725,11 @@ index 000000000..8208f3783
 +        lib("mid", opt).extern_("dep", "libdep-x.rmeta").run();
 +        compile("main", opt).extern_("mid", "libmid-x.rlib").output("main").run();
 +        let expected = run("main").stdout_utf8();
++
++        // Given a finished dependency's metadata, as build tools that start
++        // on metadata do, a crate that links finds the rlib next to it.
++        compile("main", opt).extern_("mid", "libmid-x.rmeta").output("main").run();
++        assert_eq!(run("main").stdout_utf8(), expected);
 +
 +        // From early metadata: the full metadata comes back while `mid` waits.
 +        let (built, stderr) = build_mid_on_early_metadata(opt, unhide_dep);

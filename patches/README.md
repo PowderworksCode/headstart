@@ -25,7 +25,7 @@ Every commit builds on its own, and passes the repository's own checks:
 | 1 | Don't compute the reachable set for metadata without codegen | Independent of the rest, and useful on its own: `cargo check` stops computing a set only code generation reads. The metadata doesn't change. Can go first, as its own PR. |
 | 2 | rustc_metadata: encode each definition and its MIR in helpers | A refactor with no behavior change, mostly indentation; makes commit 4 readable. |
 | 3 | Add an `analysis_interfaces` query | Splits `analysis` at the point early metadata is written. No behavior change, except the `type_check_crate` timer becomes two. |
-| 4 | Add `-Zearly-metadata`: write metadata once item interfaces are checked | The writing side: the early file, the shared crate hash, and the output locks dependents wait on. |
+| 4 | Add `-Zearly-metadata`: write metadata once item interfaces are checked | The writing side: the early file, the shared crate hash, and the output locks dependents wait on. Adds two UI tests in `tests/ui/rmeta/`. |
 | 5 | Load early metadata, and swap in full metadata before codegen | The reading side: the locator, the swap to full metadata, and waiting for full metadata and rlibs on their locks. Adds `tests/run-make/early-metadata`. |
 | 6 | Add `-Zearly-metadata-verify` | The checks the benchmark sweeps rely on. |
 
@@ -33,9 +33,19 @@ Commits 2 to 6 need a compiler MCP: `-Zearly-metadata` is a new unstable
 flag, and it extends `--json=artifacts` with three notification kinds
 (`early-metadata`, `wait-metadata`, `resume`).
 
-Tests: `./x test tests/run-make/early-metadata`, and rustc's UI suite
-(`./x test tests/ui`), which runs with the flag off and checks that
-nothing else changed.
+Tests:
+- `./x test tests/run-make/early-metadata tests/ui/rmeta`.
+- rustc's UI suite (`./x test tests/ui`), which runs with the flag off and
+  checks that nothing else changed.
+- The UI suite with the flag on for every test:
+
+  ```sh
+  ./x test tests/ui --force-rerun --compiletest-rustc-args "-Zearly-metadata -Zearly-metadata-verify"
+  ```
+
+  Every test passes except four whose expected output depends on when
+  bodies are checked: three report the same errors in another order, and
+  one prints a different query stack for a deliberate ICE.
 
 ## rust-lang/cargo
 

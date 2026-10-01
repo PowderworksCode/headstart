@@ -1,6 +1,6 @@
-From fd3ad94804044020c4b8584683dc118fe1b9c0e7 Mon Sep 17 00:00:00 2001
+From 4b26f11364cb32e6d2017c1934ba73fa5dd75341 Mon Sep 17 00:00:00 2001
 From: Zack Maril <zmaril@users.noreply.github.com>
-Date: Thu, 1 Oct 2026 16:42:40 +0000
+Date: Thu, 1 Oct 2026 17:50:46 +0000
 Subject: [PATCH 6/6] Add `-Zearly-metadata-verify`
 
 Early metadata is only sound if two things hold, and this flag reports
@@ -93,10 +93,10 @@ index 154cf4f06..5db727e9e 100644
  
      dylib_dependency_formats => { cdata.get_dylib_dependency_formats(tcx) }
 diff --git a/compiler/rustc_metadata/src/rmeta/encoder.rs b/compiler/rustc_metadata/src/rmeta/encoder.rs
-index f6dbc5d0c..15ca3d622 100644
+index 9c38332c7..6feb4eb1a 100644
 --- a/compiler/rustc_metadata/src/rmeta/encoder.rs
 +++ b/compiler/rustc_metadata/src/rmeta/encoder.rs
-@@ -2080,19 +2080,38 @@ fn interface_bodies(&mut self) -> &FxHashSet<LocalDefId> {
+@@ -1989,19 +1989,38 @@ fn interface_bodies(&mut self) -> &FxHashSet<LocalDefId> {
      }
  
      /// Encodes the deferred MIR and definitions nested in interface bodies.
@@ -133,8 +133,8 @@ index f6dbc5d0c..15ca3d622 100644
 +    }
 +
      /// `should_encode_mir`, for the kind of metadata being written.
-     ///
-     /// Early metadata records optimized MIR only for coroutines, whose
+     fn should_encode_mir(&self, def_id: LocalDefId) -> (bool, bool) {
+         let tcx = self.tcx;
 diff --git a/compiler/rustc_middle/src/ty/context.rs b/compiler/rustc_middle/src/ty/context.rs
 index 861551731..95418525f 100644
 --- a/compiler/rustc_middle/src/ty/context.rs
@@ -169,7 +169,7 @@ index 12549d72e..979407d88 100644
          "generate Windows EHCont Guard tables"),
      embed_metadata: bool = (true, parse_bool, [TRACKED],
 diff --git a/tests/run-make/early-metadata/rmake.rs b/tests/run-make/early-metadata/rmake.rs
-index 8208f3783..6b77397cb 100644
+index a5e351fc8..73f134add 100644
 --- a/tests/run-make/early-metadata/rmake.rs
 +++ b/tests/run-make/early-metadata/rmake.rs
 @@ -56,7 +56,10 @@ fn build_mid_on_early_metadata(opt: &str, finish_dep: impl FnOnce()) -> (bool, S
@@ -184,7 +184,7 @@ index 8208f3783..6b77397cb 100644
      let mut mid = mid.into_raw_command();
      mid.stderr(Stdio::piped());
      let mut child = mid.spawn().unwrap();
-@@ -105,6 +108,7 @@ fn main() {
+@@ -110,6 +113,7 @@ fn main() {
          let (built, stderr) = build_mid_on_early_metadata(opt, unhide_dep);
          assert!(built, "build from early metadata failed:\n{stderr}");
          assert!(stderr.contains(r#""emit":"resume""#), "never resumed:\n{stderr}");

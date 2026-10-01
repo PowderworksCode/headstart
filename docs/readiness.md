@@ -56,7 +56,10 @@ Not yet ready to merge.**
   - incremental edit sequences;
   - swapping to full metadata at every opt-level;
   - a dependency failing or crashing mid-build;
-  - rustc's UI suite and cargo's tests pass with the flags off.
+  - rustc's UI suite and cargo's tests pass with the flags off;
+  - rustc's UI suite with `-Zearly-metadata` forced on for all 22,170
+    tests. All pass but four, whose expected output depends on when bodies
+    are checked; see "Done since the first review".
 
 ## Open: what reviewers will push on
 
@@ -117,6 +120,32 @@ cargo build.
 
 ## Done since the first review
 
+- **The UI suite with `-Zearly-metadata` forced on** (next-steps item 5)
+  found three bug classes, now fixed and covered by tests:
+  - **An error in an interface body ICEd.** The error was in a
+    `const fn`, an `async fn` or a function returning `impl Trait`. It
+    reached the encoder as an error type or tainted MIR, which can't be
+    serialized. The early write now type-checks those bodies and builds
+    their MIR before encoding, and writes nothing if that fails. 17 tests
+    hit this.
+  - **Async closures' by-move bodies were created too early, and in
+    parallel.**
+    - They were created before the enclosing item was type-checked, which
+      ICEd for one nested in a const argument (2 tests).
+    - They were created in parallel under `-Zthreads`, which gave their
+      new `DefId`s a nondeterministic order, and could make builds
+      irreproducible. They're now created as `check_crate_bodies` does:
+      sequentially, after type-checking.
+  - **A dependency built as metadata only was waited on for an rlib that
+    would never come** (3 tests). The loader now expects an rlib only
+    while the dependency holds the rlib's lock, so `--emit=obj,metadata`
+    builds against it work again. The link-time wait only runs when
+    linking.
+
+  What remains is cosmetic, and only for crates with errors. An error in
+  an interface body is reported before errors in other bodies (3 tests
+  see the same errors in another order). A deliberate ICE's query stack
+  shows the early write (1 test).
 - **Two cargo bugs, found by review:**
   - linked-unit freshness, which could leave a stale binary
     (reproduced, fixed and tested);

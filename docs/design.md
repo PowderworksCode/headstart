@@ -41,13 +41,22 @@ just as it writes full metadata after analysis:
 
 1. `analysis_interfaces`.
 2. `write_early_metadata`:
-   - evaluate statics and synthesize async closures' by-move bodies, the
-     only definitions that checking bodies would add (encoding freezes
-     the definitions table). Like body checking, this runs in parallel
-     under `-Zthreads`, and so does computing the MIR of consts and
-     const fns for the encoder;
-   - encode `libfoo-hash.early-rmeta`;
-   - announce it with an `early-metadata` artifact notification.
+   - Create the only definitions that checking bodies would add, since
+     encoding freezes the definitions table:
+     - statics' nested allocations, by evaluating them (in parallel under
+       `-Zthreads`, as body checking does);
+     - async closures' by-move bodies, in a sequential pass, in a
+       deterministic order, each once the item it's in is type-checked,
+       as `check_crate_bodies` does. A closure's type is only known after
+       that, and so is the type of a const argument it may be nested in.
+   - Compute what the metadata needs from bodies (`prepare_early_metadata`,
+     in parallel under `-Zthreads`): type-check the interface bodies (see
+     below), and build the MIR the encoder records for them. If that
+     reports an error, stop: no early metadata is written, and the crate
+     fails as it would without the flag. An error must not reach the
+     encoder, as an error type or tainted MIR, which can't be encoded.
+   - Encode `libfoo-hash.early-rmeta`.
+   - Announce it with an `early-metadata` artifact notification.
 3. `analysis`: the bodies.
 4. Full metadata, and code generation, as usual.
 
@@ -84,8 +93,8 @@ are still valid, including code inlined or instantiated from its bodies.
 ### What encoding still forces
 
 The encoder asks the query system for whatever the metadata contains, so
-anything a crate's interface depends on is computed on demand, bodies
-included:
+anything a crate's interface depends on comes from bodies. Those bodies
+(`interface_bodies`) are computed up front, as above:
 
 - **Opaque types.** The hidden type of an `impl Trait` in a signature
   comes from type-checking the defining function's body.
@@ -97,6 +106,11 @@ included:
   future is `Send`.
 
 Everything else waits until after the write.
+
+Because these bodies are checked before the others, an error in one of
+them (in a `const fn`, an `async fn`, or a function returning `impl Trait`)
+is reported before errors in the crate's other bodies. The errors are the
+same; only their order can differ.
 
 ### What early metadata leaves out
 

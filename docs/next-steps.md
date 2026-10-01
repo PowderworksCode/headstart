@@ -230,6 +230,16 @@ check-only version.
   - linked-unit freshness;
   - every unit kind with one and four jobs.
 
+- **The UI suite with the flag forced on:** `./x test tests/ui
+  --force-rerun --compiletest-rustc-args "-Zearly-metadata
+  -Zearly-metadata-verify"`.
+  - It found three bug classes, now fixed (readiness.md): errors in
+    interface bodies ICEd; async closures' by-move bodies were created too
+    early, and in parallel; metadata-only dependencies were waited on for
+    an rlib.
+  - 4 of 22,170 tests still differ, all in expected output that depends
+    on when bodies are checked.
+
 **Still to do:**
 - UI tests that make `-Zearly-metadata-verify` report something.
 - A cargo test that pause accounting frees a slot, which needs a rustc
@@ -332,9 +342,6 @@ version, and the early write has changed since.
 - **LTO:** no script exercises the path where rustc waits for rlibs
   before code generation (`-C lto=fat|thin` across crates). Add it to
   `check-swap.sh`.
-- **`-Zearly-metadata` in the UI suite:** the suites above ran with the
-  flag off. Forcing it on (item 5) is the real test of the loader
-  changes.
 
 ### 12. Smaller items
 
