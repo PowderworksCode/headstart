@@ -22,7 +22,7 @@ now() { perl -MTime::HiRes=time -e 'printf "%.3f", time'; }
 cp "$dir/$file" "$dir/$file.orig"
 trap 'mv "$dir/$file.orig" "$dir/$file"' EXIT
 check() { # <mode>
-  (cd "$dir" && CARGO_TARGET_DIR="$dir/target-hs$1" CARGO_HEADSTART=$1 "$cargo" check -q --offline >/dev/null 2>&1)
+  (cd "$dir" && CARGO_TARGET_DIR="$dir/target-hs$1" CARGO_UNSTABLE_HEADSTART=$([ "$1" = 1 ] && echo true || echo false) "$cargo" check -q --offline >/dev/null 2>&1)
 }
 check 0; check 1 # warm both target dirs
 for run in $(seq "$runs"); do

@@ -1,0 +1,738 @@
+From 7036a2963dee58ddb5858b2f878e52ad05a9bab6 Mon Sep 17 00:00:00 2001
+From: Zack Maril <zmaril@users.noreply.github.com>
+Date: Thu, 1 Oct 2026 16:35:50 +0000
+Subject: [PATCH 5/6] Load early metadata, and swap in full metadata before
+ codegen
+
+With `-Zearly-metadata`, a crate can be compiled against a dependency's
+early metadata while that dependency is still checking its bodies:
+
+- The locator also considers `libfoo-hash.early-rmeta`, for `--extern`
+  and when searching directories, and loads the full metadata instead if
+  it exists. Writing early metadata deletes stale full metadata, so a full
+  file next to early metadata is never older. A crate that links records
+  where the dependency's rlib will be.
+- Before code generation, `CStore::load_full_metadata` replaces every
+  dependency loaded from early metadata with its full metadata, checking
+  the crate hash. The early `CrateMetadata` stays alive, so whatever was
+  decoded from it stays valid; lookups return the full one from then on.
+  Types cached by their position in the early blob are dropped, and source
+  files are imported again from the full blob. Before linking (or, with
+  cross-crate LTO, before code generation), `CStore::wait_for_rlibs` waits
+  for the rlibs.
+- Waiting: if a file isn't written yet, the compilation announces a
+  `wait-metadata` artifact notification naming it, and waits for the lock
+  its producer holds until it's written; then it announces `resume`. A
+  build tool can give its job slot to other work meanwhile. If the lock is
+  released and the file isn't there, the dependency failed or crashed, and
+  the compilation stops with an error.
+
+None of this runs without the flag.
+
+The run-make test builds a crate from early metadata with the full
+metadata hidden and its lock held, at `opt-level` 0 and 2, and checks that
+the program is the same as one built from full metadata; and that the
+crate stops with an error if the lock is released without the full
+metadata.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_011C4oUhyTKGLkWYDeejZv2e
+---
+ compiler/rustc_interface/src/passes.rs       |  17 ++
+ compiler/rustc_interface/src/queries.rs      |  11 ++
+ compiler/rustc_metadata/src/creader.rs       | 159 ++++++++++++++++++-
+ compiler/rustc_metadata/src/locator.rs       |  91 ++++++++++-
+ compiler/rustc_metadata/src/rmeta/decoder.rs |  49 ++++++
+ tests/run-make/early-metadata/dep.rs         |  16 ++
+ tests/run-make/early-metadata/main.rs        |   3 +
+ tests/run-make/early-metadata/mid.rs         |  20 +++
+ tests/run-make/early-metadata/rmake.rs       | 120 ++++++++++++++
+ 9 files changed, 478 insertions(+), 8 deletions(-)
+ create mode 100644 tests/run-make/early-metadata/dep.rs
+ create mode 100644 tests/run-make/early-metadata/main.rs
+ create mode 100644 tests/run-make/early-metadata/mid.rs
+ create mode 100644 tests/run-make/early-metadata/rmake.rs
+
+diff --git a/compiler/rustc_interface/src/passes.rs b/compiler/rustc_interface/src/passes.rs
+index ea09bdc83..605d5203d 100644
+--- a/compiler/rustc_interface/src/passes.rs
++++ b/compiler/rustc_interface/src/passes.rs
+@@ -1408,6 +1408,23 @@ pub(crate) fn start_codegen<'tcx>(
+ 
+     info!("Pre-codegen\n{:?}", tcx.debug_stats());
+ 
++    // `-Zearly-metadata`: code generation needs the full metadata of
++    // dependencies that were loaded from early metadata.
++    if tcx.sess.opts.unstable_opts.early_metadata && tcx.sess.opts.output_types.should_codegen() {
++        CStore::load_full_metadata(tcx);
++        // Cross-crate LTO reads dependencies' rlibs during code generation,
++        // not just when linking.
++        if matches!(
++            tcx.sess.lto(),
++            rustc_session::config::Lto::Fat | rustc_session::config::Lto::Thin
++        ) {
++            CStore::wait_for_rlibs(
++                tcx.sess,
++                tcx.crates(()).iter().map(|&cnum| &**tcx.used_crate_source(cnum)),
++            );
++        }
++    }
++
+     let metadata = match rustc_metadata::fs::encode_and_write_metadata(tcx) {
+         Ok(metadata) => metadata,
+         Err(guar) => guar.raise_fatal(),
+diff --git a/compiler/rustc_interface/src/queries.rs b/compiler/rustc_interface/src/queries.rs
+index 9b67cb5b8..12f0f9ae6 100644
+--- a/compiler/rustc_interface/src/queries.rs
++++ b/compiler/rustc_interface/src/queries.rs
+@@ -166,6 +166,17 @@ pub fn link(
+             return;
+         }
+ 
++        // `-Zearly-metadata`: dependencies' rlibs may still be being written.
++        if sess.opts.unstable_opts.early_metadata {
++            rustc_metadata::creader::CStore::wait_for_rlibs(
++                sess,
++                self.crate_info
++                    .used_crates
++                    .iter()
++                    .map(|cnum| &*self.crate_info.used_crate_source[cnum]),
++            );
++        }
++
+         let _timer = sess.prof.verbose_generic_activity("link_crate");
+         let _timing = sess.timings.section_guard(sess.dcx(), TimingSection::Linking);
+         codegen_backend.link(
+diff --git a/compiler/rustc_metadata/src/creader.rs b/compiler/rustc_metadata/src/creader.rs
+index 10693448e..561560c47 100644
+--- a/compiler/rustc_metadata/src/creader.rs
++++ b/compiler/rustc_metadata/src/creader.rs
+@@ -1,7 +1,8 @@
+ //! Validates all used crates and extern libraries and loads their metadata
+ 
+ use std::collections::BTreeMap;
+-use std::path::Path;
++use std::fs::File;
++use std::path::{Path, PathBuf};
+ use std::str::FromStr;
+ use std::{cmp, env, iter};
+ 
+@@ -235,11 +236,22 @@ pub fn has_crate_data(&self, cnum: CrateNum) -> bool {
+     }
+ 
+     pub(crate) fn get_crate_data(&self, cnum: CrateNum) -> &CrateMetadata {
+-        self.metas[cnum].as_ref().unwrap_or_else(|| panic!("Failed to get crate data for {cnum:?}"))
++        let data = self.metas[cnum]
++            .as_ref()
++            .unwrap_or_else(|| panic!("Failed to get crate data for {cnum:?}"));
++        // A crate loaded from early metadata is decoded from its full metadata
++        // once that's loaded.
++        data.full().unwrap_or(data)
+     }
+ 
+     pub(crate) fn get_crate_data_mut(&mut self, cnum: CrateNum) -> &mut CrateMetadata {
+-        self.metas[cnum].as_mut().unwrap_or_else(|| panic!("Failed to get crate data for {cnum:?}"))
++        let data = self.metas[cnum]
++            .as_mut()
++            .unwrap_or_else(|| panic!("Failed to get crate data for {cnum:?}"));
++        // Readers get the full metadata once it's loaded; changes to the early
++        // metadata would be lost on them.
++        assert!(data.full().is_none(), "crate data changed after its full metadata was loaded");
++        data
+     }
+ 
+     fn set_crate_data(&mut self, cnum: CrateNum, data: CrateMetadata) {
+@@ -265,9 +277,61 @@ pub fn resolved_extern_crate(&self, externs_name: Symbol) -> Option<CrateNum> {
+     }
+ 
+     pub(crate) fn iter_crate_data(&self) -> impl Iterator<Item = (CrateNum, &CrateMetadata)> {
+-        self.metas
++        self.metas.iter_enumerated().filter_map(|(cnum, data)| {
++            data.as_deref().map(|data| (cnum, data.full().unwrap_or(data)))
++        })
++    }
++
++    /// `-Zearly-metadata`: loads the full metadata of every dependency loaded
++    /// from early metadata. Code generation needs it: the MIR of generic and
++    /// inline functions, exported symbols. Full metadata that isn't written
++    /// yet is waited for (see [`wait_for_full_metadata`]).
++    pub fn load_full_metadata(tcx: TyCtxt<'_>) {
++        let cstore = CStore::from_tcx(tcx);
++        let early: Vec<CrateNum> = cstore
++            .metas
+             .iter_enumerated()
+             .filter_map(|(cnum, data)| data.as_deref().map(|data| (cnum, data)))
++            .filter(|(_, data)| data.is_early() && data.full().is_none())
++            .map(|(cnum, _)| cnum)
++            .collect();
++        let mut pause = Pause::default();
++        for cnum in early {
++            let data = cstore.metas[cnum].as_deref().unwrap();
++            let early_path = data.source().rmeta.clone().unwrap();
++            let (blob, full_path) = wait_for_full_metadata(
++                tcx,
++                &*cstore.metadata_loader,
++                &early_path,
++                data.hash(),
++                &mut pause,
++            );
++            data.set_full(tcx, blob, full_path);
++        }
++        pause.resume(tcx.sess);
++    }
++
++    /// `-Zearly-metadata`: waits until the rlibs this crate links against
++    /// exist. A crate that links can start on its dependencies' metadata; the
++    /// locator then records where each dependency's rlib will be, and the
++    /// rlib is written (atomically) when that dependency finishes. Fails if a
++    /// dependency finishes without writing it: it failed to compile.
++    pub fn wait_for_rlibs<'a>(sess: &Session, sources: impl IntoIterator<Item = &'a CrateSource>) {
++        let mut pause = Pause::default();
++        for source in sources {
++            let Some(rlib) = &source.rlib else { continue };
++            if rlib.exists() {
++                continue;
++            }
++            wait_for_output(sess, rlib, &mut pause);
++            if !rlib.exists() {
++                sess.dcx().fatal(format!(
++                    "a dependency failed to compile, or its rlib `{}` is missing",
++                    rlib.display()
++                ));
++            }
++        }
++        pause.resume(sess);
+     }
+ 
+     pub fn all_proc_macro_def_ids(&self, tcx: TyCtxt<'_>) -> impl Iterator<Item = DefId> {
+@@ -1435,3 +1499,90 @@ fn visit_item(&mut self, item: &'ast ast::Item) {
+     visit::walk_crate(&mut f, krate);
+     f.spans
+ }
++
++/// While this compilation waits for dependencies' full metadata or rlibs, it
++/// tells the build tool, announcing each file it waits for in turn (a
++/// `wait-metadata` artifact notification) and when it continues (`resume`).
++/// The build tool can give its job slot to other work meanwhile. It resumes
++/// as soon as the file is written, without taking a jobserver token, so it
++/// can't be starved by work started in its place: the build tool counts it
++/// as running again and starts nothing new until enough jobs finish. This
++/// never touches the jobserver, so a build tool that doesn't read these
++/// notifications sees a compilation that ran as usual, if longer.
++#[derive(Default)]
++struct Pause {
++    paused: bool,
++    /// The file announced last: a paused compilation can wait for several
++    /// files in turn, and announces each, so the build tool knows when it's
++    /// really ready to resume.
++    waiting_for: Option<PathBuf>,
++}
++
++impl Pause {
++    fn pause(&mut self, sess: &Session, waiting_for: &Path) {
++        if self.waiting_for.as_deref() == Some(waiting_for) {
++            return;
++        }
++        self.paused = true;
++        self.waiting_for = Some(waiting_for.to_path_buf());
++        if sess.opts.json_artifact_notifications {
++            sess.dcx().emit_artifact_notification(waiting_for, "wait-metadata");
++        }
++    }
++
++    fn resume(&mut self, sess: &Session) {
++        if !self.paused {
++            return;
++        }
++        self.paused = false;
++        self.waiting_for = None;
++        if sess.opts.json_artifact_notifications {
++            sess.dcx().emit_artifact_notification(Path::new(""), "resume");
++        }
++    }
++}
++
++/// Waits while the compilation that writes `output` holds its lock (see
++/// `fs::OutputLock`): until it has written `output`, or has failed or crashed
++/// without writing it. Returns at once if no compilation holds the lock.
++fn wait_for_output(sess: &Session, output: &Path, pause: &mut Pause) {
++    let Ok(lock) = File::open(crate::fs::output_lock_path(output)) else { return };
++    if lock.try_lock_shared().is_ok() {
++        return;
++    }
++    pause.pause(sess, output);
++    // An error here means the lock can't be waited for; the caller then
++    // checks for the output, as if the lock had been released.
++    let _ = lock.lock_shared();
++}
++
++/// Waits until the full metadata of the crate whose early metadata is at
++/// `early_path` is written, and loads it. Fails if that crate finishes
++/// without writing it, or writes it with another crate hash: it failed to
++/// compile.
++fn wait_for_full_metadata(
++    tcx: TyCtxt<'_>,
++    metadata_loader: &dyn MetadataLoader,
++    early_path: &Path,
++    hash: Svh,
++    pause: &mut Pause,
++) -> (MetadataBlob, PathBuf) {
++    let full_path = crate::locator::full_metadata_path(early_path);
++    if !full_path.exists() {
++        wait_for_output(tcx.sess, &full_path, pause);
++    }
++    match crate::locator::get_metadata_section(
++        &tcx.sess.target,
++        crate::locator::CrateFlavor::Rmeta,
++        &full_path,
++        metadata_loader,
++        tcx.sess.cfg_version,
++        None,
++    ) {
++        Ok(blob) if blob.get_crate_hash() == hash => (blob, full_path),
++        _ => tcx.dcx().fatal(format!(
++            "a dependency failed to compile after writing early metadata `{}`",
++            early_path.display()
++        )),
++    }
++}
+diff --git a/compiler/rustc_metadata/src/locator.rs b/compiler/rustc_metadata/src/locator.rs
+index 38da6561e..a5bc2c4e1 100644
+--- a/compiler/rustc_metadata/src/locator.rs
++++ b/compiler/rustc_metadata/src/locator.rs
+@@ -237,6 +237,7 @@
+ 
+ use crate::creader::{Library, MetadataLoader};
+ use crate::diagnostics;
++use crate::fs::{EARLY_METADATA_EXTENSION, early_metadata_path};
+ use crate::rmeta::{METADATA_HEADER, MetadataBlob, ProcMacroKind, rustc_version};
+ 
+ #[derive(Clone)]
+@@ -256,6 +257,10 @@ pub(crate) struct CrateLocator<'a> {
+     filesearch: &'a FileSearch,
+     is_proc_macro: bool,
+     path_kind: PathKind,
++    /// `-Zearly-metadata`: a crate may also be loaded from early metadata
++    /// (`.early-rmeta`), written before its full metadata. See
++    /// [`CrateLocator::choose_metadata`].
++    accept_early_metadata: bool,
+ }
+ 
+ #[derive(Clone, Debug)]
+@@ -341,6 +346,7 @@ pub(crate) fn new(
+             filesearch: sess.target_filesearch(),
+             path_kind,
+             is_proc_macro: false,
++            accept_early_metadata: sess.opts.unstable_opts.early_metadata,
+         }
+     }
+ 
+@@ -431,12 +437,21 @@ fn find_library_crate(
+         // option and thus can be anything, and the incorrect match will be
+         // handled safely in `extract_one`.
+         let mut should_check_staticlibs = true;
++        let early_rmeta_suffix = &format!(".{EARLY_METADATA_EXTENSION}");
++        let early_rmeta = self.accept_early_metadata.then_some((
++            rmeta_prefix.as_str(),
++            early_rmeta_suffix.as_str(),
++            CrateFlavor::Rmeta,
++        ));
+         for (prefix, suffix, kind) in [
+             (rlib_prefix.as_str(), rlib_suffix, CrateFlavor::Rlib),
+             (rmeta_prefix.as_str(), rmeta_suffix, CrateFlavor::Rmeta),
+             (dylib_prefix, dylib_suffix, CrateFlavor::Dylib),
+             (interface_prefix, interface_suffix, CrateFlavor::SDylib),
+-        ] {
++        ]
++        .into_iter()
++        .chain(early_rmeta)
++        {
+             if prefix == staticlib_prefix && suffix == staticlib_suffix {
+                 should_check_staticlibs = false;
+             }
+@@ -528,6 +543,23 @@ fn extract_lib(
+         interfaces: FxIndexSet<PathBuf>,
+     ) -> Result<Option<(Svh, Library)>, CrateError> {
+         let mut slot = None;
++        // Of a crate's early and full metadata, prefer the full metadata if
++        // it exists: writing early metadata deletes any older full metadata.
++        let rmetas = if self.accept_early_metadata {
++            let early: Vec<PathBuf> =
++                rmetas.iter().filter(|path| is_early_metadata(path)).cloned().collect();
++            let mut rmetas = rmetas;
++            for early in early {
++                let full = full_metadata_path(&early);
++                if rmetas.contains(&full) {
++                    let chosen = self.choose_metadata(&full, &early);
++                    rmetas.shift_remove(if chosen == full { &early } else { &full });
++                }
++            }
++            rmetas
++        } else {
++            rmetas
++        };
+         // Order here matters, rmeta should come first.
+         //
+         // Make sure there's at most one rlib and at most one dylib.
+@@ -543,10 +575,38 @@ fn extract_lib(
+             return Err(CrateError::FullMetadataNotFound(self.crate_name, CrateFlavor::SDylib));
+         }
+ 
++        // `-Zearly-metadata`: a crate that links, started on a dependency's
++        // metadata, links against its rlib next to it, which may not be
++        // written yet. It waits for it before linking (see
++        // `CStore::wait_for_rlibs`).
++        let rlib = match (&rlib, &dylib, &rmeta) {
++            (None, None, Some(rmeta))
++                if self.accept_early_metadata
++                    && !self.only_needs_metadata
++                    && !self.is_proc_macro =>
++            {
++                let full = if is_early_metadata(rmeta) {
++                    full_metadata_path(rmeta)
++                } else {
++                    rmeta.clone()
++                };
++                Some(full.with_extension("rlib"))
++            }
++            _ => rlib,
++        };
++
+         let source = CrateSource { rmeta, rlib, dylib, sdylib_interface };
+         Ok(slot.map(|(svh, metadata, _, _)| (svh, Library { source, metadata })))
+     }
+ 
++    /// Of a crate's full and early metadata, the one to load: the full one
++    /// if it exists, otherwise the early one. Writing early metadata deletes
++    /// the crate's old full metadata, so a full file next to early metadata
++    /// is from the same or a later compilation, never an earlier one.
++    fn choose_metadata(&self, full: &Path, early: &Path) -> PathBuf {
++        if full.exists() || !early.exists() { full.to_path_buf() } else { early.to_path_buf() }
++    }
++
+     fn needs_crate_flavor(&self, flavor: CrateFlavor) -> bool {
+         if flavor == CrateFlavor::Dylib && self.is_proc_macro {
+             return true;
+@@ -752,6 +812,19 @@ fn find_commandline_library(
+         let mut dylibs = FxIndexSet::default();
+         let mut sdylib_interfaces = FxIndexSet::default();
+         for loc in &self.exact_paths {
++            // `--extern foo=libfoo.rmeta` also finds `libfoo.early-rmeta`, and
++            // loads the full metadata if it exists.
++            let early_loc;
++            let loc = if self.accept_early_metadata
++                && loc.original().extension().is_some_and(|ext| ext == "rmeta")
++                && self.choose_metadata(loc.original(), &early_metadata_path(loc.original()))
++                    != *loc.original()
++            {
++                early_loc = CanonicalizedPath::new(early_metadata_path(loc.original()));
++                &early_loc
++            } else {
++                loc
++            };
+             let loc_canon = loc.canonicalized();
+             let loc_orig = loc.original();
+             if !loc_canon.exists() {
+@@ -774,7 +847,7 @@ fn find_commandline_library(
+                     rlibs.insert(loc_canon.clone());
+                     continue;
+                 }
+-                if file.ends_with(".rmeta") {
++                if file.ends_with(".rmeta") || is_early_metadata(loc_orig) {
+                     rmetas.insert(loc_canon.clone());
+                     continue;
+                 }
+@@ -814,7 +887,7 @@ pub(crate) fn into_error(
+     }
+ }
+ 
+-fn get_metadata_section<'p>(
++pub(crate) fn get_metadata_section<'p>(
+     target: &Target,
+     flavor: CrateFlavor,
+     filename: &'p Path,
+@@ -973,13 +1046,23 @@ fn get_flavor_from_path(path: &Path) -> CrateFlavor {
+ 
+     if filename.ends_with(".rlib") {
+         CrateFlavor::Rlib
+-    } else if filename.ends_with(".rmeta") {
++    } else if filename.ends_with(".rmeta") || is_early_metadata(path) {
+         CrateFlavor::Rmeta
+     } else {
+         CrateFlavor::Dylib
+     }
+ }
+ 
++/// Whether `path` is early metadata (`-Zearly-metadata`).
++pub(crate) fn is_early_metadata(path: &Path) -> bool {
++    path.extension().is_some_and(|ext| ext == EARLY_METADATA_EXTENSION)
++}
++
++/// The full metadata of the crate whose early metadata is at `early`.
++pub(crate) fn full_metadata_path(early: &Path) -> PathBuf {
++    early.with_extension("rmeta")
++}
++
+ /// A function to fetch all macros inside a proc-macro crate.
+ ///
+ /// Used by rust-analyzer-proc-macro-srv.
+diff --git a/compiler/rustc_metadata/src/rmeta/decoder.rs b/compiler/rustc_metadata/src/rmeta/decoder.rs
+index 7dd920c7e..2fcff8152 100644
+--- a/compiler/rustc_metadata/src/rmeta/decoder.rs
++++ b/compiler/rustc_metadata/src/rmeta/decoder.rs
+@@ -149,6 +149,12 @@ pub(crate) struct CrateMetadata {
+     /// Information about the `extern crate` item or path that caused this crate to be loaded.
+     /// If this is `None`, then the crate was injected (e.g., by the allocator).
+     extern_crate: Option<ExternCrate>,
++
++    /// `-Zearly-metadata`: if this crate was loaded from early metadata, its
++    /// full metadata once loaded (see `CStore::load_full_metadata`), which the
++    /// crate store hands out in place of this from then on. This stays alive,
++    /// so anything decoded from it stays valid.
++    full: OnceLock<Box<CrateMetadata>>,
+ }
+ 
+ /// Holds information about a rustc_span::SourceFile imported from another crate.
+@@ -1995,6 +2001,7 @@ pub(crate) fn new(
+             extern_crate: None,
+             hygiene_context: Default::default(),
+             def_key_cache: Default::default(),
++            full: OnceLock::new(),
+         };
+ 
+         cdata.incoherent_impls = cdata
+@@ -2009,6 +2016,48 @@ pub(crate) fn new(
+         cdata
+     }
+ 
++    /// Whether this crate was loaded from early metadata (`-Zearly-metadata`).
++    pub(crate) fn is_early(&self) -> bool {
++        self.source.rmeta.as_deref().is_some_and(crate::locator::is_early_metadata)
++    }
++
++    /// The full metadata that replaced this early metadata, if loaded.
++    pub(crate) fn full(&self) -> Option<&CrateMetadata> {
++        self.full.get().map(|full| &**full)
++    }
++
++    /// Replaces this early metadata with `blob`, the same crate's full
++    /// metadata at `path`, keeping what this session decided while loading it.
++    pub(crate) fn set_full(&self, tcx: TyCtxt<'_>, blob: MetadataBlob, path: PathBuf) {
++        let root = blob.get_root();
++        let unhashed = blob.get_root_unhashed();
++        let source = CrateSource { rmeta: Some(path), ..(*self.source).clone() };
++        let mut full = CrateMetadata::new(
++            tcx,
++            blob,
++            root,
++            unhashed,
++            self.raw_proc_macros,
++            self.cnum,
++            self.cnum_map.clone(),
++            self.dep_kind,
++            source,
++            self.private_dep,
++            self.host_hash,
++        );
++        full.used = self.used;
++        full.extern_crate = self.extern_crate.clone();
++        // Source files are imported again from the full metadata's table: an
++        // imported file records its index in the table it came from. Spans
++        // decoded before this keep pointing at the early imports, which stay.
++        // Types decoded through a shorthand are cached by their position in
++        // the blob, which means something else in the full metadata.
++        // (Removing entries doesn't depend on the map's iteration order.)
++        #[allow(rustc::potential_query_instability)]
++        tcx.caches.ty_rcache.borrow_mut().retain(|key, _| key.cnum != Some(self.cnum));
++        assert!(self.full.set(Box::new(full)).is_ok(), "full metadata loaded twice");
++    }
++
+     pub(crate) fn dependencies(&self) -> impl Iterator<Item = CrateNum> {
+         self.cnum_map.iter().copied()
+     }
+diff --git a/tests/run-make/early-metadata/dep.rs b/tests/run-make/early-metadata/dep.rs
+new file mode 100644
+index 000000000..b69a11aeb
+--- /dev/null
++++ b/tests/run-make/early-metadata/dep.rs
+@@ -0,0 +1,16 @@
++pub fn small(x: u32) -> u32 {
++    x + 1
++}
++
++pub fn generic<T: Default + std::fmt::Debug>() -> String {
++    format!("{:?}", T::default())
++}
++
++#[inline]
++pub fn hinted(x: u64) -> u64 {
++    x * 3
++}
++
++pub async fn later(x: u32) -> u32 {
++    small(x)
++}
+diff --git a/tests/run-make/early-metadata/main.rs b/tests/run-make/early-metadata/main.rs
+new file mode 100644
+index 000000000..119e2c20d
+--- /dev/null
++++ b/tests/run-make/early-metadata/main.rs
+@@ -0,0 +1,3 @@
++fn main() {
++    println!("{}", mid::run());
++}
+diff --git a/tests/run-make/early-metadata/mid.rs b/tests/run-make/early-metadata/mid.rs
+new file mode 100644
+index 000000000..fb13563dd
+--- /dev/null
++++ b/tests/run-make/early-metadata/mid.rs
+@@ -0,0 +1,20 @@
++pub fn poll<F: std::future::Future>(f: F) -> F::Output {
++    let waker = std::task::Waker::noop();
++    let mut cx = std::task::Context::from_waker(waker);
++    let mut f = std::pin::pin!(f);
++    loop {
++        if let std::task::Poll::Ready(v) = f.as_mut().poll(&mut cx) {
++            return v;
++        }
++    }
++}
++
++pub fn run() -> String {
++    format!(
++        "{} {} {} {}",
++        dep::small(1),
++        dep::generic::<u32>(),
++        dep::hinted(2),
++        poll(dep::later(4))
++    )
++}
+diff --git a/tests/run-make/early-metadata/rmake.rs b/tests/run-make/early-metadata/rmake.rs
+new file mode 100644
+index 000000000..8208f3783
+--- /dev/null
++++ b/tests/run-make/early-metadata/rmake.rs
+@@ -0,0 +1,120 @@
++//! `-Zearly-metadata`: a crate that depends on another can start compiling on
++//! its early metadata (`.early-rmeta`), written before the dependency's
++//! function bodies are checked. Before code generation, it waits for the
++//! dependency's full metadata, announcing `wait-metadata` and then `resume`,
++//! and must build the same program as from full metadata, at any opt-level
++//! (optimizing asks dependencies for MIR, which only full metadata has).
++//!
++//! A dependency that hasn't written its full metadata yet holds a lock on
++//! `libdep.rmeta.lock`. This test holds it in its place while the full
++//! metadata is hidden. If the lock is released without the full metadata
++//! (the dependency failed, or crashed), the waiting crate must stop with an
++//! error rather than wait.
++
++//@ ignore-cross-compile (runs the program it builds)
++//@ needs-target-std
++
++use std::fs::File;
++use std::io::{BufRead, BufReader};
++use std::path::Path;
++use std::process::Stdio;
++
++use run_make_support::{rfs, run, rustc};
++
++fn compile(name: &str, opt: &str) -> run_make_support::Rustc {
++    let mut cmd = rustc();
++    cmd.input(format!("{name}.rs"))
++        .crate_name(name)
++        .edition("2024")
++        .opt_level(opt)
++        .extra_filename("-x")
++        .arg("-Zearly-metadata");
++    cmd
++}
++
++fn lib(name: &str, opt: &str) -> run_make_support::Rustc {
++    let mut cmd = compile(name, opt);
++    cmd.crate_type("lib").emit("metadata,link");
++    cmd
++}
++
++/// Builds `mid` while `dep` looks unfinished: its full metadata and rlib are
++/// moved to `hidden/` and their locks held. Once `mid` announces it's
++/// waiting, `finish_dep` runs and the locks are released. Returns whether
++/// `mid` built, and its stderr.
++fn build_mid_on_early_metadata(opt: &str, finish_dep: impl FnOnce()) -> (bool, String) {
++    rfs::create_dir("hidden");
++    rfs::rename("libdep-x.rmeta", "hidden/libdep-x.rmeta");
++    rfs::rename("libdep-x.rlib", "hidden/libdep-x.rlib");
++    let locks: Vec<File> = ["libdep-x.rmeta.lock", "libdep-x.rlib.lock"]
++        .into_iter()
++        .map(|path| {
++            let file = File::create(path).unwrap();
++            file.lock().unwrap();
++            file
++        })
++        .collect();
++
++    let mut mid = lib("mid", opt);
++    mid.extern_("dep", "libdep-x.rmeta").error_format("json").json("artifacts");
++    let mut mid = mid.into_raw_command();
++    mid.stderr(Stdio::piped());
++    let mut child = mid.spawn().unwrap();
++    let mut stderr = String::new();
++    let mut lines = BufReader::new(child.stderr.take().unwrap()).lines();
++    for line in &mut lines {
++        let line = line.unwrap();
++        let paused = line.contains(r#""emit":"wait-metadata""#);
++        stderr.push_str(&line);
++        stderr.push('\n');
++        if paused {
++            break;
++        }
++    }
++    assert!(stderr.contains(r#""emit":"wait-metadata""#), "never paused:\n{stderr}");
++    finish_dep();
++    drop(locks);
++    for line in lines {
++        stderr.push_str(&line.unwrap());
++        stderr.push('\n');
++    }
++    let built = child.wait().unwrap().success();
++    (built, stderr)
++}
++
++fn unhide_dep() {
++    rfs::rename("hidden/libdep-x.rmeta", "libdep-x.rmeta");
++    rfs::rename("hidden/libdep-x.rlib", "libdep-x.rlib");
++    rfs::remove_dir("hidden");
++}
++
++fn main() {
++    for opt in ["0", "2"] {
++        lib("dep", opt).run();
++        assert!(Path::new("libdep-x.early-rmeta").exists(), "no early metadata");
++        // Its locks are gone once `dep` has finished.
++        assert!(!Path::new("libdep-x.rmeta.lock").exists());
++        assert!(!Path::new("libdep-x.rlib.lock").exists());
++
++        // From full metadata.
++        lib("mid", opt).extern_("dep", "libdep-x.rmeta").run();
++        compile("main", opt).extern_("mid", "libmid-x.rlib").output("main").run();
++        let expected = run("main").stdout_utf8();
++
++        // From early metadata: the full metadata comes back while `mid` waits.
++        let (built, stderr) = build_mid_on_early_metadata(opt, unhide_dep);
++        assert!(built, "build from early metadata failed:\n{stderr}");
++        assert!(stderr.contains(r#""emit":"resume""#), "never resumed:\n{stderr}");
++        compile("main", opt).extern_("mid", "libmid-x.rlib").output("main").run();
++        assert_eq!(run("main").stdout_utf8(), expected);
++
++        // From early metadata, and `dep` stops without writing full metadata.
++        let (built, stderr) = build_mid_on_early_metadata(opt, || {});
++        assert!(!built, "built although the dependency failed");
++        assert!(
++            stderr.contains("a dependency failed to compile after writing early metadata"),
++            "unexpected failure:\n{stderr}"
++        );
++        unhide_dep();
++    }
++}
+-- 
+2.43.0
+

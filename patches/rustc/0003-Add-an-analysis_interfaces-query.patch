@@ -1,0 +1,124 @@
+From cf76e7539528e62ed4c0707d898726a7684482a6 Mon Sep 17 00:00:00 2001
+From: Zack Maril <zmaril@users.noreply.github.com>
+Date: Thu, 1 Oct 2026 16:34:10 +0000
+Subject: [PATCH 3/6] Add an `analysis_interfaces` query
+
+Splits the analysis that `analysis` runs into two parts: everything up to
+and including the item interface checks (well-formedness, coherence),
+which is now the `analysis_interfaces` query, and type-checking function
+bodies. `analysis` runs `analysis_interfaces` first, so nothing changes in
+what runs or in what order.
+
+This gives a point at which the crate's interface is known to be checked
+but no function body has been, which `-Zearly-metadata` writes metadata
+at. The `type_check_crate` timer of the analysis pass is now
+`type_check_crate_interfaces` and `type_check_crate_bodies`;
+`rustc_hir_analysis::check_crate` still runs both, for `-Zunpretty`.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_011C4oUhyTKGLkWYDeejZv2e
+---
+ compiler/rustc_hir_analysis/src/lib.rs | 11 +++++++++++
+ compiler/rustc_interface/src/passes.rs | 18 ++++++++++++++----
+ compiler/rustc_middle/src/queries.rs   | 11 +++++++++++
+ 3 files changed, 36 insertions(+), 4 deletions(-)
+
+diff --git a/compiler/rustc_hir_analysis/src/lib.rs b/compiler/rustc_hir_analysis/src/lib.rs
+index c0abcc3a6..4d83e8c6a 100644
+--- a/compiler/rustc_hir_analysis/src/lib.rs
++++ b/compiler/rustc_hir_analysis/src/lib.rs
+@@ -145,7 +145,14 @@ pub fn provide(providers: &mut Providers) {
+ 
+ pub fn check_crate(tcx: TyCtxt<'_>) {
+     let _prof_timer = tcx.sess.timer("type_check_crate");
++    check_crate_interfaces(tcx);
++    check_crate_bodies(tcx);
++}
+ 
++/// The part of [`check_crate`] that checks item interfaces (well-formedness,
++/// coherence) without type-checking function bodies. Metadata written after
++/// this describes the crate's interface (`-Zearly-metadata`).
++pub fn check_crate_interfaces(tcx: TyCtxt<'_>) {
+     tcx.sess.time("coherence_checking", || {
+         // When discarding query call results, use an explicit type to indicate
+         // what we are intending to discard, to help future type-based refactoring.
+@@ -160,7 +167,11 @@ pub fn check_crate(tcx: TyCtxt<'_>) {
+         let _: R = tcx.ensure_result().crate_inherent_impls_validity_check(());
+         let _: R = tcx.ensure_result().crate_inherent_impls_overlap_check(());
+     });
++}
+ 
++/// The part of [`check_crate`] after [`check_crate_interfaces`]: evaluates
++/// statics and consts, and type-checks every body.
++pub fn check_crate_bodies(tcx: TyCtxt<'_>) {
+     tcx.par_hir_body_owners(|item_def_id| {
+         let def_kind = tcx.def_kind(item_def_id);
+         // Make sure we evaluate all static and (non-associated) const items, even if unused.
+diff --git a/compiler/rustc_interface/src/passes.rs b/compiler/rustc_interface/src/passes.rs
+index 5ea1cb209..18d5ac382 100644
+--- a/compiler/rustc_interface/src/passes.rs
++++ b/compiler/rustc_interface/src/passes.rs
+@@ -891,6 +891,7 @@ pub fn write_interface<'tcx>(tcx: TyCtxt<'tcx>) {
+ 
+ pub static DEFAULT_QUERY_PROVIDERS: LazyLock<Providers> = LazyLock::new(|| {
+     let providers = &mut Providers::default();
++    providers.queries.analysis_interfaces = analysis_interfaces;
+     providers.queries.analysis = analysis;
+     providers.queries.resolver_for_lowering_raw = resolver_for_lowering_raw;
+     providers.queries.stripped_cfg_items = |tcx, _| &tcx.resolutions(()).stripped_cfg_items[..];
+@@ -1087,9 +1088,9 @@ pub fn emit_delayed_lints(tcx: TyCtxt<'_>) {
+     }
+ }
+ 
+-/// Runs all analyses that we guarantee to run, even if errors were reported in earlier analyses.
+-/// This function never fails.
+-fn run_required_analyses(tcx: TyCtxt<'_>) {
++/// Runs the required analyses up to and including the item interface checks,
++/// before any function body is type-checked. See the `analysis_interfaces` query.
++fn analysis_interfaces(tcx: TyCtxt<'_>, (): ()) {
+     if tcx.sess.opts.unstable_opts.input_stats {
+         rustc_passes::input_stats::print_hir_stats(tcx);
+     }
+@@ -1144,7 +1145,16 @@ fn run_required_analyses(tcx: TyCtxt<'_>) {
+         emit_delayed_lints(tcx);
+     });
+ 
+-    rustc_hir_analysis::check_crate(tcx);
++    let _prof_timer = tcx.sess.timer("type_check_crate_interfaces");
++    rustc_hir_analysis::check_crate_interfaces(tcx);
++}
++
++/// Runs all analyses that we guarantee to run, even if errors were reported in earlier analyses.
++/// This function never fails.
++fn run_required_analyses(tcx: TyCtxt<'_>) {
++    let sess = tcx.sess;
++    tcx.ensure_ok().analysis_interfaces(());
++    sess.time("type_check_crate_bodies", || rustc_hir_analysis::check_crate_bodies(tcx));
+     // Freeze definitions as we don't add new ones at this point.
+     // We need to wait until now since we synthesize a by-move body
+     // for all coroutine-closures.
+diff --git a/compiler/rustc_middle/src/queries.rs b/compiler/rustc_middle/src/queries.rs
+index ddaf12f98..9b0e3ac58 100644
+--- a/compiler/rustc_middle/src/queries.rs
++++ b/compiler/rustc_middle/src/queries.rs
+@@ -403,6 +403,17 @@ fn describe_as_module(def_id: impl Into<LocalDefId>, tcx: TyCtxt<'_>) -> String
+         }
+     }
+ 
++    /// The analysis passes that check the crate's item interfaces, before any
++    /// function body is type-checked. `analysis` runs these first; with
++    /// `-Zearly-metadata`, the driver writes early metadata after them.
++    query analysis_interfaces(key: ()) {
++        eval_always
++        desc {
++            "checking item interfaces of crate `{}`",
++            tcx.crate_name(LOCAL_CRATE),
++        }
++    }
++
+     /// The root query triggering all analysis passes like typeck or borrowck.
+     query analysis(key: ()) {
+         eval_always
+-- 
+2.43.0
+

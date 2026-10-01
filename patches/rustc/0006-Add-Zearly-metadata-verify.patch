@@ -1,0 +1,197 @@
+From fd3ad94804044020c4b8584683dc118fe1b9c0e7 Mon Sep 17 00:00:00 2001
+From: Zack Maril <zmaril@users.noreply.github.com>
+Date: Thu, 1 Oct 2026 16:42:40 +0000
+Subject: [PATCH 6/6] Add `-Zearly-metadata-verify`
+
+Early metadata is only sound if two things hold, and this flag reports
+when they don't, to stderr (build tools hide dependencies' diagnostics):
+
+- No query that only full metadata can answer (optimized MIR, exported
+  symbols, cross-crate inlinability, deduced parameter attributes, the
+  panic strategy) is asked of a crate still loaded from early metadata.
+  The answer would be wrong, and would stay cached after the swap to full
+  metadata.
+- Every definition left out of early metadata is nested in a body the
+  interface doesn't depend on. If such a body was type-checked during the
+  early write anyway, `interface_bodies` missed it.
+
+The run-make test now passes it, and checks that it reports nothing.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_011C4oUhyTKGLkWYDeejZv2e
+---
+ .../src/rmeta/decoder/cstore_impl.rs          | 40 ++++++++++++++++++-
+ compiler/rustc_metadata/src/rmeta/encoder.rs  | 19 +++++++++
+ compiler/rustc_middle/src/ty/context.rs       |  7 ++++
+ compiler/rustc_session/src/options.rs         |  4 ++
+ tests/run-make/early-metadata/rmake.rs        |  6 ++-
+ 5 files changed, 74 insertions(+), 2 deletions(-)
+
+diff --git a/compiler/rustc_metadata/src/rmeta/decoder/cstore_impl.rs b/compiler/rustc_metadata/src/rmeta/decoder/cstore_impl.rs
+index 154cf4f06..5db727e9e 100644
+--- a/compiler/rustc_metadata/src/rmeta/decoder/cstore_impl.rs
++++ b/compiler/rustc_metadata/src/rmeta/decoder/cstore_impl.rs
+@@ -94,6 +94,32 @@ fn process_decoded(self, _tcx: TyCtxt<'_>, _err: impl Fn() -> !) -> Option<Depre
+     }
+ }
+ 
++/// Queries that only full metadata answers; early metadata
++/// (`-Zearly-metadata`) leaves their data out. `is_mir_available` is checked
++/// where it answers no.
++const FULL_METADATA_QUERIES: &[&str] = &[
++    "cross_crate_inlinable",
++    "deduced_param_attrs",
++    "reachable_non_generics",
++    "exported_non_generic_symbols",
++    "exported_generic_symbols",
++    "required_panic_strategy",
++];
++
++/// `-Zearly-metadata-verify`: reports a query that only full metadata can
++/// answer, asked about a crate still loaded from early metadata. The answer
++/// would be wrong, and would stay cached after the full metadata is loaded.
++///
++/// Printed to stderr rather than as a diagnostic, like `-Zprint-*` output:
++/// build tools hide the diagnostics of dependencies, and this concerns
++/// every crate in the build.
++fn verify_not_early(tcx: TyCtxt<'_>, krate: CrateNum, query: &str) {
++    eprintln!(
++        "early-metadata-verify: `{query}` of `{}` answered from early metadata",
++        tcx.crate_name(krate)
++    );
++}
++
+ macro_rules! provide_one {
+     ($tcx:ident, $def_id:ident, $other:ident, $cdata:ident, $name:ident => { table }) => {
+         provide_one! {
+@@ -156,6 +182,12 @@ fn $name<'tcx>(
+ 
+             let cstore = CStore::from_tcx($tcx);
+             let $cdata = cstore.get_crate_data($def_id.krate);
++            if $tcx.sess.opts.unstable_opts.early_metadata_verify
++                && $cdata.is_early()
++                && FULL_METADATA_QUERIES.contains(&stringify!($name))
++            {
++                verify_not_early($tcx, $def_id.krate, stringify!($name));
++            }
+ 
+             $compute
+         }
+@@ -329,7 +361,13 @@ fn into_args(self) -> (DefId, SimplifiedType) {
+     associated_item => { cdata.get_associated_item(tcx, def_id.index) }
+     inherent_impls => { cdata.get_inherent_implementations_for_type(tcx, def_id.index) }
+     attrs_for_def => { tcx.arena.alloc_from_iter(cdata.get_item_attrs(tcx, def_id.index)) }
+-    is_mir_available => { cdata.is_item_mir_available(def_id.index) }
++    is_mir_available => {
++        let available = cdata.is_item_mir_available(def_id.index);
++        if !available && tcx.sess.opts.unstable_opts.early_metadata_verify && cdata.is_early() {
++            verify_not_early(tcx, def_id.krate, "is_mir_available");
++        }
++        available
++    }
+     cross_crate_inlinable => { table_direct }
+ 
+     dylib_dependency_formats => { cdata.get_dylib_dependency_formats(tcx) }
+diff --git a/compiler/rustc_metadata/src/rmeta/encoder.rs b/compiler/rustc_metadata/src/rmeta/encoder.rs
+index f6dbc5d0c..15ca3d622 100644
+--- a/compiler/rustc_metadata/src/rmeta/encoder.rs
++++ b/compiler/rustc_metadata/src/rmeta/encoder.rs
+@@ -2080,19 +2080,38 @@ fn interface_bodies(&mut self) -> &FxHashSet<LocalDefId> {
+     }
+ 
+     /// Encodes the deferred MIR and definitions nested in interface bodies.
++    /// With `-Zearly-metadata-verify`, reports any left out whose body was
++    /// type-checked anyway: a body `interface_bodies` should have included.
+     fn encode_deferred(&mut self) {
++        let verify = self.tcx.sess.opts.unstable_opts.early_metadata_verify;
+         for (def_id, body, c, o) in std::mem::take(&mut self.deferred_mir) {
+             if self.interface_bodies().contains(&body) {
+                 self.encode_mir_for(def_id, c, o);
++            } else if verify {
++                self.report_missed_body(def_id, body);
+             }
+         }
+         for (def_id, body) in std::mem::take(&mut self.deferred_defs) {
+             if self.interface_bodies().contains(&body) {
+                 self.encode_info_for_def(def_id);
++            } else if verify {
++                self.report_missed_body(def_id, body);
+             }
+         }
+     }
+ 
++    /// Printed to stderr like `verify_not_early`'s reports, for the same reason.
++    fn report_missed_body(&self, def_id: LocalDefId, body: LocalDefId) {
++        if self.tcx.typeck_is_done(body) {
++            eprintln!(
++                "early-metadata-verify: left out `{}`, but `{}` was type-checked \
++                 during the early write",
++                self.tcx.def_path_debug_str(def_id.to_def_id()),
++                self.tcx.def_path_debug_str(body.to_def_id()),
++            );
++        }
++    }
++
+     /// `should_encode_mir`, for the kind of metadata being written.
+     ///
+     /// Early metadata records optimized MIR only for coroutines, whose
+diff --git a/compiler/rustc_middle/src/ty/context.rs b/compiler/rustc_middle/src/ty/context.rs
+index 861551731..95418525f 100644
+--- a/compiler/rustc_middle/src/ty/context.rs
++++ b/compiler/rustc_middle/src/ty/context.rs
+@@ -1402,6 +1402,13 @@ fn iter_local_def_id_unchecked(self) -> impl Iterator<Item = LocalDefId> {
+         }
+     }
+ 
++    /// Whether `typeck(def_id)` has already been computed in this session,
++    /// without computing it. Only for `-Zearly-metadata-verify`'s report.
++    pub fn typeck_is_done(self, def_id: LocalDefId) -> bool {
++        let root = self.typeck_root_def_id_local(def_id);
++        self.query_system.query_vtables.typeck_root.cache.lookup(&root).is_some()
++    }
++
+     /// Like [`Self::definitions`], but only requires the crate's item
+     /// interfaces to be checked; see [`Self::iter_local_def_id_after_interfaces`].
+     pub fn definitions_after_interfaces(self) -> &'tcx rustc_hir::definitions::Definitions {
+diff --git a/compiler/rustc_session/src/options.rs b/compiler/rustc_session/src/options.rs
+index 12549d72e..979407d88 100644
+--- a/compiler/rustc_session/src/options.rs
++++ b/compiler/rustc_session/src/options.rs
+@@ -2516,6 +2516,10 @@ pub(crate) fn parse_rust_version(slot: &mut Option<RustcVersion>, v: Option<&str
+     early_metadata: bool = (false, parse_bool, [TRACKED],
+         "write crate metadata as soon as item interfaces are checked, before function \
+         bodies are, so dependent crates can start sooner (default: no)"),
++    early_metadata_verify: bool = (false, parse_bool, [UNTRACKED],
++        "with `-Zearly-metadata`, report bodies type-checked during the early write whose \
++        nested definitions were left out of it, and queries only full metadata can answer \
++        asked of crates loaded from early metadata (default: no)"),
+     ehcont_guard: bool = (false, parse_bool, [TRACKED],
+         "generate Windows EHCont Guard tables"),
+     embed_metadata: bool = (true, parse_bool, [TRACKED],
+diff --git a/tests/run-make/early-metadata/rmake.rs b/tests/run-make/early-metadata/rmake.rs
+index 8208f3783..6b77397cb 100644
+--- a/tests/run-make/early-metadata/rmake.rs
++++ b/tests/run-make/early-metadata/rmake.rs
+@@ -56,7 +56,10 @@ fn build_mid_on_early_metadata(opt: &str, finish_dep: impl FnOnce()) -> (bool, S
+         .collect();
+ 
+     let mut mid = lib("mid", opt);
+-    mid.extern_("dep", "libdep-x.rmeta").error_format("json").json("artifacts");
++    mid.extern_("dep", "libdep-x.rmeta")
++        .arg("-Zearly-metadata-verify")
++        .error_format("json")
++        .json("artifacts");
+     let mut mid = mid.into_raw_command();
+     mid.stderr(Stdio::piped());
+     let mut child = mid.spawn().unwrap();
+@@ -105,6 +108,7 @@ fn main() {
+         let (built, stderr) = build_mid_on_early_metadata(opt, unhide_dep);
+         assert!(built, "build from early metadata failed:\n{stderr}");
+         assert!(stderr.contains(r#""emit":"resume""#), "never resumed:\n{stderr}");
++        assert!(!stderr.contains("early-metadata-verify"), "verify reported:\n{stderr}");
+         compile("main", opt).extern_("mid", "libmid-x.rlib").output("main").run();
+         assert_eq!(run("main").stdout_utf8(), expected);
+ 
+-- 
+2.43.0
+

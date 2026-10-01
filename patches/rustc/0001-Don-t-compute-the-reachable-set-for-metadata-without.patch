@@ -1,0 +1,51 @@
+From dc66174326b9f4f16d88109b9520072b2dfabb88 Mon Sep 17 00:00:00 2001
+From: Zack Maril <zmaril@users.noreply.github.com>
+Date: Thu, 1 Oct 2026 16:31:40 +0000
+Subject: [PATCH 1/6] Don't compute the reachable set for metadata without
+ codegen
+
+`should_encode_mir` only reads the reachable set when generating code, but
+`encode_mir` computed it for every compilation that writes metadata,
+including `--emit=metadata` (`cargo check`). Computing it walks the bodies
+of inline and generic functions, and at `opt-level` 1 or more asks for
+their optimized MIR.
+
+The encoded metadata is the same.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_011C4oUhyTKGLkWYDeejZv2e
+---
+ compiler/rustc_metadata/src/rmeta/encoder.rs | 10 +++++++++-
+ 1 file changed, 9 insertions(+), 1 deletion(-)
+
+diff --git a/compiler/rustc_metadata/src/rmeta/encoder.rs b/compiler/rustc_metadata/src/rmeta/encoder.rs
+index 40b61a52d..03b6fa80a 100644
+--- a/compiler/rustc_metadata/src/rmeta/encoder.rs
++++ b/compiler/rustc_metadata/src/rmeta/encoder.rs
+@@ -1179,6 +1179,14 @@ fn should_encode_mir(
+     }
+ }
+ 
++/// The reachable set, as `should_encode_mir` reads it: only with code
++/// generation. Without, it's empty: computing it walks the bodies of inline
++/// and generic functions, and at `opt-level` 1 or more, optimizes them.
++fn reachable_set_for_mir(tcx: TyCtxt<'_>) -> &LocalDefIdSet {
++    static EMPTY: std::sync::LazyLock<LocalDefIdSet> = std::sync::LazyLock::new(Default::default);
++    if tcx.sess.opts.output_types.should_codegen() { tcx.reachable_set(()) } else { &EMPTY }
++}
++
+ fn should_encode_variances<'tcx>(tcx: TyCtxt<'tcx>, def_id: DefId, def_kind: DefKind) -> bool {
+     match def_kind {
+         DefKind::Struct
+@@ -1867,7 +1875,7 @@ fn encode_mir(&mut self) {
+         }
+ 
+         let tcx = self.tcx;
+-        let reachable_set = tcx.reachable_set(());
++        let reachable_set = reachable_set_for_mir(tcx);
+ 
+         let keys_and_jobs = tcx.mir_keys(()).iter().filter_map(|&def_id| {
+             let (encode_const, encode_opt) = should_encode_mir(tcx, reachable_set, def_id);
+-- 
+2.43.0
+

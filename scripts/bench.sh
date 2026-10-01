@@ -56,7 +56,7 @@ for spec in "$@"; do
       rm -f "$log"
       start=$(now)
       (cd "$out/work/$name" &&
-        HEADSTART_LOG=$log CARGO_HEADSTART=$([ $mode = on ] && echo 1 || echo 0) \
+        HEADSTART_LOG=$log CARGO_UNSTABLE_HEADSTART=$([ $mode = on ] && echo true || echo false) \
           "$cargo" "$command" -q -j "$jobs" --offline --message-format=short $args >/dev/null 2>"${log%.txt}.err")
       status=$?
       secs=$(perl -e "printf '%.2f', $(now) - $start")

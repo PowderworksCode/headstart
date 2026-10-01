@@ -1,0 +1,858 @@
+From 5482e380fa3eeb8716d6151e20bda5a2950a2ab7 Mon Sep 17 00:00:00 2001
+From: Zack Maril <zmaril@users.noreply.github.com>
+Date: Thu, 1 Oct 2026 16:35:21 +0000
+Subject: [PATCH 4/6] Add `-Zearly-metadata`: write metadata once item
+ interfaces are checked
+
+With `-Zearly-metadata`, the driver writes a second, early metadata file
+(`libfoo-hash.early-rmeta`) after `analysis_interfaces`, before any
+function body is type-checked, and announces it with an `early-metadata`
+artifact notification. A build tool can start dependent crates on it
+while this crate checks its bodies; a following commit lets rustc load
+it. Full metadata is written as usual, later.
+
+Early metadata holds what dependents need for analysis, not what they
+need for code generation:
+
+- Whatever the interface needs from a body is computed on demand: an
+  opaque type's hidden type, the MIR of consts and const fns, coroutine
+  witnesses. Statics are evaluated, and async closures' by-move bodies
+  created, first, since encoding freezes the definitions table. Under
+  `-Zthreads`, this runs in parallel like body checking.
+- Definitions nested in other bodies (closures, inline consts, const
+  arguments) are only encoded if their body is one the interface depends
+  on (`interface_bodies`), a function of the crate's code alone.
+- Optimized MIR (except coroutines'), deduced parameter attributes,
+  exported symbols, the reachable set and the panic strategy are left out:
+  computing them would check or optimize every body, and only code
+  generation reads them.
+
+Both files carry the same crate hash, computed once from the early
+metadata's bytes plus the usual supplement (the HIR hash, covering every
+body, and the tracked options), so it identifies the crate as completely
+as before. Full metadata asserts that it agrees.
+
+Before writing, the compilation takes an exclusive lock on
+`libfoo-hash.rmeta.lock` and, if it links, `libfoo-hash.rlib.lock`, and
+deletes stale full metadata and rlib. Each lock is released, and its file
+removed, once that output is written, or when the compilation ends without
+it. Dependents wait on these locks instead of polling. If the compilation
+fails, the early metadata is deleted.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_011C4oUhyTKGLkWYDeejZv2e
+---
+ compiler/rustc_driver_impl/src/lib.rs        |  12 +-
+ compiler/rustc_interface/src/passes.rs       |  87 ++++++
+ compiler/rustc_interface/src/queries.rs      |   4 +-
+ compiler/rustc_metadata/src/fs.rs            | 112 +++++++-
+ compiler/rustc_metadata/src/lib.rs           |   5 +-
+ compiler/rustc_metadata/src/rmeta/encoder.rs | 279 +++++++++++++++++--
+ compiler/rustc_metadata/src/rmeta/mod.rs     |   2 +-
+ compiler/rustc_middle/src/ty/context.rs      |  19 ++
+ compiler/rustc_session/src/options.rs        |   3 +
+ 9 files changed, 499 insertions(+), 24 deletions(-)
+
+diff --git a/compiler/rustc_driver_impl/src/lib.rs b/compiler/rustc_driver_impl/src/lib.rs
+index 210f04a11..63f7bd356 100644
+--- a/compiler/rustc_driver_impl/src/lib.rs
++++ b/compiler/rustc_driver_impl/src/lib.rs
+@@ -313,6 +313,8 @@ pub fn run_compiler(at_args: &[String], callbacks: &mut (dyn Callbacks + Send))
+                 return None;
+             }
+ 
++            let mut early_metadata = passes::write_early_metadata(tcx);
++
+             tcx.ensure_ok().analysis(());
+ 
+             if callbacks.after_analysis(compiler, tcx) == Compilation::Stop {
+@@ -325,7 +327,8 @@ pub fn run_compiler(at_args: &[String], callbacks: &mut (dyn Callbacks + Send))
+                 }
+             }
+ 
+-            let linker = Linker::codegen_and_build_linker(tcx, codegen_backend);
++            let linker =
++                Linker::codegen_and_build_linker(tcx, codegen_backend, &mut early_metadata);
+ 
+             if let Some(metrics_dir) = &sess.opts.unstable_opts.metrics_dir {
+                 dump_feature_usage_metrics(tcx, metrics_dir);
+@@ -333,12 +336,15 @@ pub fn run_compiler(at_args: &[String], callbacks: &mut (dyn Callbacks + Send))
+ 
+             tcx.report_unused_features();
+ 
+-            Some(linker)
++            Some((linker, early_metadata.into_files()))
+         });
+ 
+         // Linking is done outside the `compiler.enter()` so that the
+         // `GlobalCtxt` within `Queries` can be freed as early as possible.
+-        if let (Some(linker), incr_comp_session) = linker {
++        if let (Some((linker, early_metadata)), incr_comp_session) = linker {
++            // Linking finishes code generation and writes the rlib, which
++            // dependents started on the early metadata may be waiting for.
++            let _early_metadata = passes::EarlyMetadata::new(sess, early_metadata);
+             linker.link(sess, incr_comp_session, codegen_backend);
+         }
+     })
+diff --git a/compiler/rustc_interface/src/passes.rs b/compiler/rustc_interface/src/passes.rs
+index 18d5ac382..ea09bdc83 100644
+--- a/compiler/rustc_interface/src/passes.rs
++++ b/compiler/rustc_interface/src/passes.rs
+@@ -28,6 +28,7 @@
+ use rustc_lint::{BufferedEarlyLint, EarlyCheckNode, LintStore, unerased_lint_store};
+ use rustc_metadata::EncodedMetadata;
+ use rustc_metadata::creader::CStore;
++use rustc_metadata::fs::EarlyMetadataFiles;
+ use rustc_middle::arena::Arena;
+ use rustc_middle::middle::resolve::{ResolverAstLowering, ResolverGlobalCtxt};
+ use rustc_middle::ty::{self, RegisteredTools, TyCtxt};
+@@ -1292,11 +1293,96 @@ fn analysis(tcx: TyCtxt<'_>, (): ()) {
+     }
+ }
+ 
++/// Early metadata written by [`write_early_metadata`], kept until the
++/// compilation ends: linking writes the rlib after the global context is gone.
++///
++/// Dependents started on the early metadata wait for the crate's full
++/// metadata and rlib by waiting for locks held until each is written (see
++/// [`rustc_metadata::fs::OutputLock`]). If the compilation fails (reports
++/// errors, or panics), the locks are released without them, which tells
++/// those dependents to stop; the early metadata itself is deleted too.
++#[must_use]
++pub struct EarlyMetadata<'a> {
++    sess: &'a Session,
++    files: Option<EarlyMetadataFiles>,
++}
++
++impl<'a> EarlyMetadata<'a> {
++    /// Guards `files` for the rest of `sess`'s compilation.
++    pub fn new(sess: &'a Session, files: Option<EarlyMetadataFiles>) -> Self {
++        EarlyMetadata { sess, files }
++    }
++
++    /// Stops guarding the early metadata, and returns its files, to be
++    /// guarded again with [`EarlyMetadata::new`].
++    pub fn into_files(mut self) -> Option<EarlyMetadataFiles> {
++        self.files.take()
++    }
++
++    fn full_metadata_written(&mut self) {
++        if let Some(files) = &mut self.files {
++            files.full_metadata_written();
++        }
++    }
++}
++
++impl Drop for EarlyMetadata<'_> {
++    fn drop(&mut self) {
++        let Some(mut files) = self.files.take() else { return };
++        if std::thread::panicking() || self.sess.dcx().has_errors().is_some() {
++            let _ = std::fs::remove_file(&files.path);
++        }
++        files.rlib_written();
++    }
++}
++
++/// `-Zearly-metadata`: once the crate's item interfaces are checked, and
++/// before its function bodies are, write early metadata (and announce it with
++/// `--json=artifacts`) so a build tool can start dependent crates. Whatever
++/// the interface needs from a body (an opaque type's hidden type, a const's
++/// value) is computed on demand. Full metadata is written as usual later. If a
++/// body fails to check, compilation still fails, and the early metadata is
++/// withdrawn; see [`EarlyMetadata`].
++pub fn write_early_metadata(tcx: TyCtxt<'_>) -> EarlyMetadata<'_> {
++    let none = EarlyMetadata { sess: tcx.sess, files: None };
++    // Crates nothing can depend on (binaries) write no early metadata.
++    if !tcx.sess.opts.unstable_opts.early_metadata
++        || !tcx.sess.opts.output_types.contains_key(&OutputType::Metadata)
++        || !tcx.needs_metadata()
++    {
++        return none;
++    }
++    tcx.ensure_ok().analysis_interfaces(());
++    if tcx.sess.dcx().has_errors_or_delayed_bugs().is_some() {
++        return none;
++    }
++    // Encoding freezes the definitions table, so first create the
++    // definitions that checking bodies adds: statics' nested allocations and
++    // async closures' by-move bodies. This checks those bodies now, the way
++    // `check_crate_bodies` would (in parallel under `-Zthreads`).
++    tcx.par_hir_body_owners(|def_id| {
++        if let rustc_hir::def::DefKind::Static { .. } = tcx.def_kind(def_id) {
++            tcx.ensure_ok().eval_static_initializer(def_id);
++        }
++        if tcx.needs_coroutine_by_move_body_def_id(def_id.to_def_id()) {
++            tcx.ensure_done().coroutine_by_move_body_def_id(def_id);
++        }
++    });
++    if tcx.sess.dcx().has_errors_or_delayed_bugs().is_some() {
++        return none;
++    }
++    EarlyMetadata {
++        sess: tcx.sess,
++        files: rustc_metadata::fs::encode_and_write_early_metadata(tcx),
++    }
++}
++
+ /// Runs the codegen backend, after which the AST and analysis can
+ /// be discarded.
+ pub(crate) fn start_codegen<'tcx>(
+     codegen_backend: &dyn CodegenBackend,
+     tcx: TyCtxt<'tcx>,
++    early_metadata: &mut EarlyMetadata<'_>,
+ ) -> (Box<dyn Any>, CrateInfo, EncodedMetadata) {
+     tcx.sess.timings.start_section(tcx.sess.dcx(), TimingSection::Codegen);
+ 
+@@ -1326,6 +1412,7 @@ pub(crate) fn start_codegen<'tcx>(
+         Ok(metadata) => metadata,
+         Err(guar) => guar.raise_fatal(),
+     };
++    early_metadata.full_metadata_written();
+ 
+     let is_host_metadata = tcx
+         .sess
+diff --git a/compiler/rustc_interface/src/queries.rs b/compiler/rustc_interface/src/queries.rs
+index 759297bc6..9b67cb5b8 100644
+--- a/compiler/rustc_interface/src/queries.rs
++++ b/compiler/rustc_interface/src/queries.rs
+@@ -29,8 +29,10 @@ impl Linker {
+     pub fn codegen_and_build_linker(
+         tcx: TyCtxt<'_>,
+         codegen_backend: &dyn CodegenBackend,
++        early_metadata: &mut passes::EarlyMetadata<'_>,
+     ) -> Linker {
+-        let (ongoing_codegen, crate_info, metadata) = passes::start_codegen(codegen_backend, tcx);
++        let (ongoing_codegen, crate_info, metadata) =
++            passes::start_codegen(codegen_backend, tcx, early_metadata);
+ 
+         Linker {
+             dep_graph: tcx.dep_graph.clone(),
+diff --git a/compiler/rustc_metadata/src/fs.rs b/compiler/rustc_metadata/src/fs.rs
+index ed177708f..7602a0d40 100644
+--- a/compiler/rustc_metadata/src/fs.rs
++++ b/compiler/rustc_metadata/src/fs.rs
+@@ -14,7 +14,7 @@
+     BinaryOutputToTty, FailedCopyToStdout, FailedCreateEncodedMetadata, FailedCreateFile,
+     FailedCreateTempdir, FailedWriteError,
+ };
+-use crate::{EncodedMetadata, encode_metadata};
++use crate::{EncodedMetadata, encode_early_metadata, encode_metadata};
+ 
+ // FIXME(eddyb) maybe include the crate name in this?
+ pub const METADATA_FILENAME: &str = "lib.rmeta";
+@@ -117,6 +117,116 @@ pub fn encode_and_write_metadata(tcx: TyCtxt<'_>) -> Result<EncodedMetadata, Err
+     Ok(metadata)
+ }
+ 
++/// Where `-Zearly-metadata` writes early metadata for a crate whose full
++/// metadata goes to `rmeta`: `libfoo-hash.rmeta` becomes `libfoo-hash.early-rmeta`.
++pub fn early_metadata_path(rmeta: &Path) -> PathBuf {
++    rmeta.with_extension(EARLY_METADATA_EXTENSION)
++}
++
++pub const EARLY_METADATA_EXTENSION: &str = "early-rmeta";
++
++/// The lock file guarding `output` (see [`OutputLock`]): `libfoo-hash.rlib`
++/// is guarded by `libfoo-hash.rlib.lock`.
++pub fn output_lock_path(output: &Path) -> PathBuf {
++    let mut path = output.as_os_str().to_owned();
++    path.push(".lock");
++    PathBuf::from(path)
++}
++
++/// `-Zearly-metadata`: an exclusive lock on an output's lock file, taken
++/// before early metadata is written and released once the output (the full
++/// metadata, or the rlib) is written. A dependent compilation started on the
++/// early metadata that needs the output waits for the lock, then checks that
++/// the output exists. If this compilation fails or crashes first, the lock is
++/// released without the output having been written, and the dependent stops.
++pub struct OutputLock {
++    file: fs::File,
++    path: PathBuf,
++}
++
++impl OutputLock {
++    fn acquire(output: &Path) -> Option<OutputLock> {
++        let path = output_lock_path(output);
++        let file = fs::File::create(&path).ok()?;
++        file.try_lock().ok()?;
++        Some(OutputLock { file, path })
++    }
++}
++
++impl Drop for OutputLock {
++    fn drop(&mut self) {
++        // A dependent that opened the file before it's removed still gets
++        // the lock; one that opens it later finds no lock file, and checks
++        // the output directly.
++        let _ = fs::remove_file(&self.path);
++        let _ = self.file.unlock();
++    }
++}
++
++/// Early metadata written by [`encode_and_write_early_metadata`], and the
++/// locks held until the crate's full metadata and rlib are written.
++pub struct EarlyMetadataFiles {
++    pub path: PathBuf,
++    metadata_lock: Option<OutputLock>,
++    rlib_lock: Option<OutputLock>,
++}
++
++impl EarlyMetadataFiles {
++    /// The full metadata is written: dependents waiting for it can go on.
++    pub fn full_metadata_written(&mut self) {
++        self.metadata_lock = None;
++    }
++
++    /// The rlib is written (or won't be): dependents waiting for it can go
++    /// on.
++    pub fn rlib_written(&mut self) {
++        self.rlib_lock = None;
++    }
++}
++
++/// Writes early metadata (`-Zearly-metadata`) next to where the full metadata
++/// will go, and announces it with an `early-metadata` artifact notification.
++///
++/// First takes the locks dependents will wait on for the full metadata and the
++/// rlib (see [`OutputLock`]), and deletes full metadata and an rlib left over
++/// from an earlier compilation: from then on, one that exists is this
++/// compilation's. Writes nothing if a lock can't be taken.
++pub fn encode_and_write_early_metadata(tcx: TyCtxt<'_>) -> Option<EarlyMetadataFiles> {
++    let OutFileName::Real(out_filename) = filename_for_metadata(tcx.sess, tcx.output_filenames(()))
++    else {
++        return None;
++    };
++    let metadata_lock = Some(OutputLock::acquire(&out_filename)?);
++    let _ = fs::remove_file(&out_filename);
++    let mut rlib_lock = None;
++    if tcx.crate_types().contains(&CrateType::Rlib) {
++        let rlib = out_filename.with_extension("rlib");
++        if tcx.sess.opts.output_types.should_link() {
++            rlib_lock = Some(OutputLock::acquire(&rlib)?);
++        }
++        let _ = fs::remove_file(rlib);
++    }
++    let early_filename = early_metadata_path(&out_filename);
++    // Written elsewhere and renamed into place, as for full metadata.
++    let metadata_tmpdir = TempDirBuilder::new()
++        .prefix("rmeta")
++        .tempdir_in(out_filename.parent().unwrap_or_else(|| Path::new("")))
++        .unwrap_or_else(|err| tcx.dcx().emit_fatal(FailedCreateTempdir { err }));
++    let metadata_tmpdir = MaybeTempDir::new(metadata_tmpdir, tcx.sess.opts.cg.save_temps);
++    let tmp_filename = metadata_tmpdir.as_ref().join("early.rmeta");
++    encode_early_metadata(tcx, &tmp_filename);
++    if tcx.sess.dcx().has_errors_or_delayed_bugs().is_some() {
++        return None;
++    }
++    if let Err(err) = non_durable_rename(&tmp_filename, &early_filename) {
++        tcx.dcx().emit_fatal(FailedWriteError { filename: early_filename, err });
++    }
++    if tcx.sess.opts.json_artifact_notifications {
++        tcx.dcx().emit_artifact_notification(&early_filename, "early-metadata");
++    }
++    Some(EarlyMetadataFiles { path: early_filename, metadata_lock, rlib_lock })
++}
++
+ #[cfg(not(target_os = "linux"))]
+ pub fn non_durable_rename(src: &Path, dst: &Path) -> std::io::Result<()> {
+     std::fs::rename(src, dst)
+diff --git a/compiler/rustc_metadata/src/lib.rs b/compiler/rustc_metadata/src/lib.rs
+index dd963fc87..a5065a32c 100644
+--- a/compiler/rustc_metadata/src/lib.rs
++++ b/compiler/rustc_metadata/src/lib.rs
+@@ -27,4 +27,7 @@
+ 
+ pub use fs::{METADATA_FILENAME, emit_wrapper_file};
+ pub use host_dylib::{DylibError, load_symbol_from_dylib};
+-pub use rmeta::{EncodedMetadata, METADATA_HEADER, ProcMacroKind, encode_metadata, rendered_const};
++pub use rmeta::{
++    EncodedMetadata, METADATA_HEADER, ProcMacroKind, encode_early_metadata, encode_metadata,
++    rendered_const,
++};
+diff --git a/compiler/rustc_metadata/src/rmeta/encoder.rs b/compiler/rustc_metadata/src/rmeta/encoder.rs
+index 6283e293f..f6dbc5d0c 100644
+--- a/compiler/rustc_metadata/src/rmeta/encoder.rs
++++ b/compiler/rustc_metadata/src/rmeta/encoder.rs
+@@ -10,7 +10,7 @@
+ 
+ use rustc_attr_ir::{AttributeKind, EncodeCrossCrate, find_attr};
+ use rustc_data_structures::fingerprint::Fingerprint;
+-use rustc_data_structures::fx::{FxIndexMap, FxIndexSet};
++use rustc_data_structures::fx::{FxHashSet, FxIndexMap, FxIndexSet};
+ use rustc_data_structures::memmap::{Mmap, MmapMut};
+ use rustc_data_structures::owned_slice::slice_owned;
+ use rustc_data_structures::stable_hash::{StableHash, StableHasher};
+@@ -78,6 +78,16 @@ pub(super) struct EncodeContext<'a, 'tcx> {
+     hygiene_ctxt: Rc<RefCell<HygieneEncodeContext>>,
+     // Used for both `Symbol`s and `ByteSymbol`s.
+     symbol_index_table: FxHashMap<u32, usize>,
++
++    /// Whether this is early metadata (`-Zearly-metadata`), encoded after the
++    /// crate's item interfaces are checked and before its bodies are.
++    early: bool,
++    // Early metadata: the bodies the crate's interface needs (see
++    // `interface_bodies`), and the MIR and definitions nested in other
++    // bodies, which are left out.
++    interface_bodies: Option<FxHashSet<LocalDefId>>,
++    deferred_mir: Vec<(LocalDefId, LocalDefId, bool, bool)>,
++    deferred_defs: Vec<(LocalDefId, LocalDefId)>,
+ }
+ 
+ /// If the current crate is a proc-macro, returns early with `LazyArray::default()`.
+@@ -522,7 +532,11 @@ fn encode_symbol_or_byte_symbol(
+     }
+ 
+     fn encode_def_path_table(&mut self) {
+-        let defs = self.tcx.definitions();
++        let defs = if self.early {
++            self.tcx.definitions_after_interfaces()
++        } else {
++            self.tcx.definitions()
++        };
+         if self.is_proc_macro {
+             for def_id in std::iter::once(CRATE_DEF_ID)
+                 .chain(self.tcx.resolutions(()).proc_macros.iter().copied())
+@@ -713,13 +727,20 @@ macro_rules! stat {
+             stat!("exportable-items", || self.encode_stable_order_of_exportable_impls());
+ 
+         // Encode exported symbols info. This is prefetched in `encode_metadata`.
+-        let (exported_non_generic_symbols, exported_generic_symbols) =
++        // Early metadata leaves them out: computing them collects the crate's
++        // monomorphizations, which needs its bodies and its dependencies' full
++        // metadata, and only code generation and linking read them, from full
++        // metadata.
++        let (exported_non_generic_symbols, exported_generic_symbols) = if self.early {
++            (LazyArray::default(), LazyArray::default())
++        } else {
+             stat!("exported-symbols", || {
+                 (
+                     self.encode_exported_symbols(tcx.exported_non_generic_symbols(LOCAL_CRATE)),
+                     self.encode_exported_symbols(tcx.exported_generic_symbols(LOCAL_CRATE)),
+                 )
+-            });
++            })
++        };
+ 
+         // Encode the hygiene data.
+         // IMPORTANT: this *must* be the last thing that we encode (other than `SourceMap`). The
+@@ -749,7 +770,13 @@ macro_rules! stat {
+                 },
+ 
+                 stable_crate_id: tcx.stable_crate_id(LOCAL_CRATE),
+-                required_panic_strategy: tcx.required_panic_strategy(LOCAL_CRATE),
++                // Computing this scans every body's MIR. Only linking reads it,
++                // from full metadata.
++                required_panic_strategy: if self.early {
++                    None
++                } else {
++                    tcx.required_panic_strategy(LOCAL_CRATE)
++                },
+                 panic_in_drop_strategy: tcx.sess.opts.unstable_opts.panic_in_drop,
+                 edition: tcx.sess.edition(),
+                 has_global_allocator: tcx.has_global_allocator(LOCAL_CRATE),
+@@ -802,7 +829,17 @@ macro_rules! stat {
+         // By default the crate hash (SVH) is derived from the encoded metadata bytes. With
+         // `-Z metadata-crate-hash=no` we instead store the legacy HIR-based hash, which the
+         // `crate_hash` query computes directly without consulting `local_crate_hash`.
+-        let hash = if tcx.sess.opts.unstable_opts.metadata_crate_hash {
++        // With `-Zearly-metadata`, the crate hash is computed once, from the
++        // early metadata, and full metadata carries the same one: dependents
++        // that compiled against either file must agree on the crate's
++        // identity. It's still complete: the encoded bytes cover the
++        // interface (and every dependency's hash), and the supplement mixed
++        // into the hasher covers all HIR, bodies included, and the tracked
++        // options, the inputs full metadata is a function of.
++        let early_hash = if self.early { None } else { tcx.untracked().local_crate_hash.get() };
++        let hash = if let Some(&early_hash) = early_hash {
++            early_hash
++        } else if tcx.sess.opts.unstable_opts.metadata_crate_hash {
+             self.opaque.flush();
+             Svh::new(Fingerprint::from_le_bytes(
+                 self.metadata_hasher.lock().unwrap().finish_128().to_le_bytes(),
+@@ -810,7 +847,9 @@ macro_rules! stat {
+         } else {
+             tcx.crate_hash(LOCAL_CRATE)
+         };
+-        tcx.untracked().local_crate_hash.set(hash).expect("local_crate_hash set twice");
++        if early_hash.is_none() {
++            tcx.untracked().local_crate_hash.set(hash).expect("local_crate_hash set twice");
++        }
+ 
+         let unhashed = stat!("final", || {
+             // Indexed by dependency `CrateNum`, matching the numbering `encode_crate_deps` uses.
+@@ -1466,9 +1505,20 @@ fn encode_def_ids(&mut self) {
+ 
+         let tcx = self.tcx;
+ 
+-        for local_id in tcx.iter_local_def_id() {
++        let local_ids: Vec<LocalDefId> = if self.early {
++            tcx.iter_local_def_id_after_interfaces().collect()
++        } else {
++            tcx.iter_local_def_id().collect()
++        };
++        for local_id in local_ids {
++            if let Some(body) = self.early_enclosing_body(local_id) {
++                self.tables.def_kind.set_some(local_id.local_def_index, tcx.def_kind(local_id));
++                self.deferred_defs.push((local_id, body));
++                continue;
++            }
+             self.encode_info_for_def(local_id);
+         }
++        self.encode_deferred();
+ 
+         for (def_id, impls) in &tcx.crate_inherent_impls(()).0.inherent_impls {
+             record_defaulted_array!(self.tables.inherent_impls[def_id.to_def_id()] <- impls.iter().map(|def_id| {
+@@ -1927,26 +1977,173 @@ fn encode_mir_for(&mut self, def_id: LocalDefId, encode_const: bool, encode_opt:
+         }
+     }
+ 
++    /// With `-Zearly-metadata`, function bodies aren't type-checked yet. If
++    /// `def_id` is nested in one (a closure, an inline const, a const
++    /// argument), returns that body's owner: `def_id` is encoded only if that
++    /// body is one of [`Self::interface_bodies`]. Coroutines are encoded
++    /// regardless: dependents read their witnesses to check `Send`.
++    fn early_enclosing_body(&self, def_id: LocalDefId) -> Option<LocalDefId> {
++        let tcx = self.tcx;
++        if !self.early {
++            return None;
++        }
++        match tcx.def_kind(def_id) {
++            DefKind::Closure | DefKind::SyntheticCoroutineBody => {
++                if tcx.is_coroutine(def_id.to_def_id()) {
++                    return None;
++                }
++                return Some(tcx.typeck_root_def_id_local(def_id));
++            }
++            // Inline consts are type-checked with their parent body.
++            DefKind::AnonConst if tcx.is_typeck_child(def_id.to_def_id()) => {
++                return Some(tcx.typeck_root_def_id_local(def_id));
++            }
++            DefKind::AnonConst => {}
++            _ => return None,
++        }
++        for (id, node) in tcx.hir_parent_iter(tcx.local_def_id_to_hir_id(def_id)) {
++            match node {
++                hir::Node::Expr(_)
++                | hir::Node::Block(_)
++                | hir::Node::Stmt(_)
++                | hir::Node::LetStmt(_)
++                | hir::Node::Pat(_)
++                | hir::Node::PatExpr(_) => {
++                    return Some(tcx.typeck_root_def_id_local(tcx.hir_enclosing_body_owner(id)));
++                }
++                hir::Node::Item(_)
++                | hir::Node::TraitItem(_)
++                | hir::Node::ImplItem(_)
++                | hir::Node::ForeignItem(_) => return None,
++                _ => {}
++            }
++        }
++        None
++    }
++
++    /// With `-Zearly-metadata`, the bodies whose type-checking the crate's
++    /// interface depends on, as a function of the crate's code alone:
++    ///
++    /// - bodies the encoder records MIR for: consts, const fns, coroutines;
++    /// - statics, which are evaluated before the early write;
++    /// - bodies that define an opaque type's hidden type.
++    ///
++    /// Definitions nested in any other body are left out of early metadata.
++    fn interface_bodies(&mut self) -> &FxHashSet<LocalDefId> {
++        let tcx = self.tcx;
++        if self.interface_bodies.is_none() {
++            let mut bodies = FxHashSet::default();
++            for &def_id in tcx.mir_keys(()) {
++                if self.early_enclosing_body(def_id).is_some() {
++                    continue;
++                }
++                let (encode_const, encode_opt) = self.should_encode_mir(def_id);
++                if encode_const || encode_opt {
++                    bodies.insert(tcx.typeck_root_def_id_local(def_id));
++                }
++            }
++            let mut type_alias_opaques = FxHashSet::default();
++            let items = tcx.hir_crate_items(());
++            for def_id in items.definitions().chain(items.opaques()) {
++                match tcx.def_kind(def_id) {
++                    DefKind::Static { .. } => {
++                        bodies.insert(def_id);
++                    }
++                    DefKind::OpaqueTy => match tcx.local_opaque_ty_origin(def_id) {
++                        hir::OpaqueTyOrigin::FnReturn { parent, .. }
++                        | hir::OpaqueTyOrigin::AsyncFn { parent, .. } => {
++                            bodies.insert(tcx.typeck_root_def_id_local(parent));
++                        }
++                        hir::OpaqueTyOrigin::TyAlias { .. } => {
++                            type_alias_opaques.insert(def_id);
++                        }
++                    },
++                    _ => {}
++                }
++            }
++            // A `type Alias = impl Trait` is defined by whichever bodies may
++            // define it.
++            if !type_alias_opaques.is_empty() {
++                for owner in tcx.hir_body_owners() {
++                    if tcx
++                        .opaque_types_defined_by(owner)
++                        .iter()
++                        .any(|opaque| type_alias_opaques.contains(&opaque))
++                    {
++                        bodies.insert(tcx.typeck_root_def_id_local(owner));
++                    }
++                }
++            }
++            self.interface_bodies = Some(bodies);
++        }
++        self.interface_bodies.as_ref().unwrap()
++    }
++
++    /// Encodes the deferred MIR and definitions nested in interface bodies.
++    fn encode_deferred(&mut self) {
++        for (def_id, body, c, o) in std::mem::take(&mut self.deferred_mir) {
++            if self.interface_bodies().contains(&body) {
++                self.encode_mir_for(def_id, c, o);
++            }
++        }
++        for (def_id, body) in std::mem::take(&mut self.deferred_defs) {
++            if self.interface_bodies().contains(&body) {
++                self.encode_info_for_def(def_id);
++            }
++        }
++    }
++
++    /// `should_encode_mir`, for the kind of metadata being written.
++    ///
++    /// Early metadata records optimized MIR only for coroutines, whose
++    /// layout dependents compute during analysis (the MIR inliner leaves
++    /// coroutine bodies alone). Optimizing any other body would type-check
++    /// it, and would run the MIR inliner, which asks dependencies loaded
++    /// from early metadata whether they have MIR. They say no, and that
++    /// answer would stay cached after their full metadata is loaded.
++    ///
++    /// Early metadata doesn't consult the reachable set either: computing it
++    /// walks the bodies of inline and generic functions.
++    fn should_encode_mir(&self, def_id: LocalDefId) -> (bool, bool) {
++        let tcx = self.tcx;
++        if !self.early {
++            return should_encode_mir(tcx, reachable_set_for_mir(tcx), def_id);
++        }
++        let (encode_const, encode_opt) = should_encode_mir(tcx, &LocalDefIdSet::default(), def_id);
++        let coroutine = match tcx.def_kind(def_id) {
++            DefKind::Closure => tcx.is_coroutine(def_id.to_def_id()),
++            DefKind::SyntheticCoroutineBody => true,
++            _ => false,
++        };
++        (encode_const, encode_opt && coroutine)
++    }
++
+     fn encode_mir(&mut self) {
+         if self.is_proc_macro {
+             return;
+         }
+ 
+         let tcx = self.tcx;
+-        let reachable_set = reachable_set_for_mir(tcx);
+-
+         let keys_and_jobs = tcx.mir_keys(()).iter().filter_map(|&def_id| {
+-            let (encode_const, encode_opt) = should_encode_mir(tcx, reachable_set, def_id);
++            let (encode_const, encode_opt) = self.should_encode_mir(def_id);
+             if encode_const || encode_opt { Some((def_id, encode_const, encode_opt)) } else { None }
+         });
+-        for (def_id, encode_const, encode_opt) in keys_and_jobs {
++        for (def_id, encode_const, encode_opt) in keys_and_jobs.collect::<Vec<_>>() {
++            if let Some(body) = self.early_enclosing_body(def_id) {
++                self.deferred_mir.push((def_id, body, encode_const, encode_opt));
++                continue;
++            }
+             self.encode_mir_for(def_id, encode_const, encode_opt);
+         }
+ 
+         // Encode all the deduced parameter attributes for everything that has MIR, even for items
+         // that can't be inlined. But don't if we aren't optimizing in non-incremental mode, to
+         // save the query traffic.
+-        if tcx.sess.opts.output_types.should_codegen()
++        //
++        // Not in early metadata: deducing them optimizes every body, and only code generation
++        // reads them, from full metadata.
++        if !self.early
++            && tcx.sess.opts.output_types.should_codegen()
+             && tcx.sess.opts.optimize != OptLevel::No
+             && tcx.sess.opts.incremental.is_none()
+         {
+@@ -2418,6 +2615,27 @@ fn prefetch_mir(tcx: TyCtxt<'_>) {
+     })
+ }
+ 
++/// `prefetch_mir` for early metadata: the MIR of consts and const fns.
++/// Anonymous consts are left alone: those in bodies (const arguments,
++/// array lengths) are typed by type-checking the enclosing body.
++fn prefetch_early_mir(tcx: TyCtxt<'_>) {
++    let unreachable = LocalDefIdSet::default();
++    par_for_each_in(tcx.mir_keys(()), |&&def_id| {
++        if !matches!(
++            tcx.def_kind(def_id),
++            DefKind::Const | DefKind::AssocConst | DefKind::Fn | DefKind::AssocFn
++        ) || tcx.is_trivial_const(def_id)
++        {
++            return;
++        }
++        let (encode_const, _) = should_encode_mir(tcx, &unreachable, def_id);
++        if encode_const {
++            tcx.ensure_done().mir_for_ctfe(def_id);
++            tcx.ensure_done().promoted_mir(def_id);
++        }
++    })
++}
++
+ // NOTE(eddyb) The following comment was preserved for posterity, even
+ // though it's no longer relevant as EBML (which uses nested & tagged
+ // "documents") was replaced with a scheme that can't go out of bounds.
+@@ -2560,13 +2778,17 @@ pub fn encode_metadata(tcx: TyCtxt<'_>, path: &Path, ref_path: Option<&Path>) {
+         let owned = slice_owned(mmap, Deref::deref);
+         let blob = MetadataBlob::new(owned);
+         let hash = blob.expect("file already created").get_crate_hash();
+-        tcx.untracked().local_crate_hash.set(hash).expect("local_crate_hash set twice");
++        match tcx.untracked().local_crate_hash.get() {
++            // Early metadata was encoded first.
++            Some(&early) => assert_eq!(early, hash, "early and full metadata disagree on the SVH"),
++            None => tcx.untracked().local_crate_hash.set(hash).expect("local_crate_hash set twice"),
++        }
+ 
+         // Generate the metadata stub manually, as that is a small file compared to full metadata.
+         if let Some(ref_path) = ref_path {
+             let _prof_timer = tcx.prof.verbose_generic_activity("generate_crate_metadata_stub");
+ 
+-            with_encode_metadata_header(tcx, ref_path, |ecx| {
++            with_encode_metadata_header(tcx, ref_path, false, |ecx| {
+                 let header: LazyValue<CrateHeader> = ecx.lazy(CrateHeader {
+                     name: tcx.crate_name(LOCAL_CRATE),
+                     triple: tcx.sess.opts.target_triple.clone(),
+@@ -2599,7 +2821,7 @@ pub fn encode_metadata(tcx: TyCtxt<'_>, path: &Path, ref_path: Option<&Path>) {
+         dep_node,
+         tcx,
+         || {
+-            with_encode_metadata_header(tcx, path, |ecx| {
++            with_encode_metadata_header(tcx, path, false, |ecx| {
+                 // Encode all the entries and extra information in the crate,
+                 // culminating in the `CrateRoot` which points to all of it.
+                 let (root, unhashed) = ecx.encode_crate_root();
+@@ -2623,7 +2845,7 @@ pub fn encode_metadata(tcx: TyCtxt<'_>, path: &Path, ref_path: Option<&Path>) {
+     if let Some(ref_path) = ref_path {
+         let _prof_timer = tcx.prof.verbose_generic_activity("generate_crate_metadata_stub");
+ 
+-        with_encode_metadata_header(tcx, ref_path, |ecx| {
++        with_encode_metadata_header(tcx, ref_path, false, |ecx| {
+             let header: LazyValue<CrateHeader> = ecx.lazy(CrateHeader {
+                 name: tcx.crate_name(LOCAL_CRATE),
+                 triple: tcx.sess.opts.target_triple.clone(),
+@@ -2635,9 +2857,28 @@ pub fn encode_metadata(tcx: TyCtxt<'_>, path: &Path, ref_path: Option<&Path>) {
+     }
+ }
+ 
++/// Encodes early metadata (`-Zearly-metadata`) to `path`: the crate's item
++/// interfaces, written after `analysis_interfaces` and before function bodies
++/// are checked, so dependents can start compiling. It isn't tracked for
++/// incremental reuse; it's cheap and always re-encoded.
++pub fn encode_early_metadata(tcx: TyCtxt<'_>, path: &Path) {
++    tcx.dep_graph.assert_ignored();
++    let _prof_timer = tcx.prof.verbose_generic_activity("generate_crate_metadata_early");
++    if tcx.sess.opts.jobs.frontend.is_some() {
++        // As for full metadata: not necessary for correctness, only for performance.
++        prefetch_early_mir(tcx);
++    }
++    with_encode_metadata_header(tcx, path, true, |ecx| {
++        let (root, unhashed) = ecx.encode_crate_root();
++        ecx.opaque.flush();
++        (root.position.get(), unhashed.position.get())
++    })
++}
++
+ fn with_encode_metadata_header(
+     tcx: TyCtxt<'_>,
+     path: &Path,
++    early: bool,
+     f: impl FnOnce(&mut EncodeContext<'_, '_>) -> (usize, usize),
+ ) {
+     // By default the crate hash (SVH) is computed from the bytes of the encoded metadata,
+@@ -2708,6 +2949,10 @@ fn with_encode_metadata_header(
+         is_proc_macro: tcx.crate_types().contains(&CrateType::ProcMacro),
+         hygiene_ctxt: Default::default(),
+         symbol_index_table: Default::default(),
++        early,
++        interface_bodies: None,
++        deferred_mir: Default::default(),
++        deferred_defs: Default::default(),
+     };
+ 
+     // Encode the rustc version string in a predictable location.
+diff --git a/compiler/rustc_metadata/src/rmeta/mod.rs b/compiler/rustc_metadata/src/rmeta/mod.rs
+index b70151604..6e5c1bcab 100644
+--- a/compiler/rustc_metadata/src/rmeta/mod.rs
++++ b/compiler/rustc_metadata/src/rmeta/mod.rs
+@@ -6,7 +6,7 @@
+ pub(crate) use decoder::{CrateMetadata, CrateNumMap, MetadataBlob, TargetModifiers};
+ use def_path_hash_map::DefPathHashMapRef;
+ use encoder::EncodeContext;
+-pub use encoder::{EncodedMetadata, encode_metadata, rendered_const};
++pub use encoder::{EncodedMetadata, encode_early_metadata, encode_metadata, rendered_const};
+ pub(crate) use parameterized::ParameterizedOverTcx;
+ use rustc_abi::{FieldIdx, ReprOptions, VariantIdx};
+ use rustc_ast as ast;
+diff --git a/compiler/rustc_middle/src/ty/context.rs b/compiler/rustc_middle/src/ty/context.rs
+index b6e204dd5..861551731 100644
+--- a/compiler/rustc_middle/src/ty/context.rs
++++ b/compiler/rustc_middle/src/ty/context.rs
+@@ -1372,7 +1372,19 @@ pub fn create_crate_num(
+     pub fn iter_local_def_id(self) -> impl Iterator<Item = LocalDefId> {
+         // Depend on the `analysis` query to ensure compilation if finished.
+         self.ensure_ok().analysis(());
++        self.iter_local_def_id_unchecked()
++    }
++
++    /// Like [`Self::iter_local_def_id`], but only requires the crate's item
++    /// interfaces to be checked (`analysis_interfaces`). For `-Zearly-metadata`,
++    /// which encodes metadata before function bodies are checked. The caller
++    /// must first create any definitions that checking bodies would add.
++    pub fn iter_local_def_id_after_interfaces(self) -> impl Iterator<Item = LocalDefId> {
++        self.ensure_ok().analysis_interfaces(());
++        self.iter_local_def_id_unchecked()
++    }
+ 
++    fn iter_local_def_id_unchecked(self) -> impl Iterator<Item = LocalDefId> {
+         let definitions = &self.untracked.definitions;
+         gen {
+             let mut i = 0;
+@@ -1390,6 +1402,13 @@ pub fn iter_local_def_id(self) -> impl Iterator<Item = LocalDefId> {
+         }
+     }
+ 
++    /// Like [`Self::definitions`], but only requires the crate's item
++    /// interfaces to be checked; see [`Self::iter_local_def_id_after_interfaces`].
++    pub fn definitions_after_interfaces(self) -> &'tcx rustc_hir::definitions::Definitions {
++        self.ensure_ok().analysis_interfaces(());
++        self.untracked.definitions.freeze()
++    }
++
+     pub fn definitions(self) -> &'tcx rustc_hir::definitions::Definitions {
+         // Depend on the `analysis` query to ensure compilation if finished.
+         self.ensure_ok().analysis(());
+diff --git a/compiler/rustc_session/src/options.rs b/compiler/rustc_session/src/options.rs
+index 4c153cbb8..12549d72e 100644
+--- a/compiler/rustc_session/src/options.rs
++++ b/compiler/rustc_session/src/options.rs
+@@ -2513,6 +2513,9 @@ pub(crate) fn parse_rust_version(slot: &mut Option<RustcVersion>, v: Option<&str
+     eagerly_emit_delayed_bugs: bool = (false, parse_bool, [UNTRACKED],
+         "emit delayed bugs eagerly as errors instead of stashing them and emitting \
+         them only if an error has not been emitted"),
++    early_metadata: bool = (false, parse_bool, [TRACKED],
++        "write crate metadata as soon as item interfaces are checked, before function \
++        bodies are, so dependent crates can start sooner (default: no)"),
+     ehcont_guard: bool = (false, parse_bool, [TRACKED],
+         "generate Windows EHCont Guard tables"),
+     embed_metadata: bool = (true, parse_bool, [TRACKED],
+-- 
+2.43.0
+

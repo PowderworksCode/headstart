@@ -22,7 +22,7 @@ step() { # <name> <edit command, run in the workspace>
   local name=$1 edit=$2 mode out
   for mode in 0 1; do
     (cd "$tmp/ws$mode" && eval "$edit" && sleep 1 &&
-      CARGO_HEADSTART=$mode "$cargo" $command --color never --message-format short 2>&1 |
+      CARGO_UNSTABLE_HEADSTART=$([ $mode = 1 ] && echo true || echo false) "$cargo" $command --color never --message-format short 2>&1 |
         grep -v -e '^ *Checking ' -e '^ *Compiling ' -e '^ *Finished ' -e '^ *Blocking ' -e 'build failed, waiting for other jobs' > "$tmp/$name.$mode"
       echo "exit ${PIPESTATUS[0]}" >> "$tmp/$name.$mode"
       if [ $command = build ] && [ -x target/debug/app ]; then target/debug/app >> "$tmp/$name.$mode" 2>&1; fi)
@@ -48,7 +48,7 @@ step touch-all "touch slow/src/lib.rs mid/src/lib.rs app/src/main.rs"
 
 # The final incremental state against a clean build of the same sources.
 for mode in 0 1; do
-  (cd "$tmp/ws$mode" && rm -rf target && CARGO_HEADSTART=$mode "$cargo" $command --color never --message-format short 2>&1 |
+  (cd "$tmp/ws$mode" && rm -rf target && CARGO_UNSTABLE_HEADSTART=$([ $mode = 1 ] && echo true || echo false) "$cargo" $command --color never --message-format short 2>&1 |
     grep -v -e '^ *Checking ' -e '^ *Compiling ' -e '^ *Finished ' -e '^ *Blocking ' -e 'build failed, waiting for other jobs' > "$tmp/clean.$mode"; echo "exit ${PIPESTATUS[0]}" >> "$tmp/clean.$mode"
     if [ $command = build ] && [ -x target/debug/app ]; then target/debug/app >> "$tmp/clean.$mode" 2>&1; fi)
 done
