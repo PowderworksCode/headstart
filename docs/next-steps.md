@@ -246,15 +246,25 @@ version.
 
 ### 8. Rebase onto a newer rustc
 
-**Problem.** The patch is against rustc `a22b02e` and cargo `3d7cf6e`.
-meilisearch's current code no longer compiles with that rustc, with or
-without headstart.
+**Done on 2026-10-01.** The patches are now against rust-lang/rust
+`6006fd0` and cargo `4f3fb24`, up from `a22b02e` and `3d7cf6e`.
+- Both applied without conflicts.
+- The sweeps, the check scripts, rustc's UI suite and the timings were
+  rerun afterwards (results.md, "After rebasing onto current master").
 
-**How:**
-- Bump the submodules and reapply the patches.
-- Expect conflicts in `rustc_metadata` (`encoder.rs`, `creader.rs`,
-  `locator.rs`), and in `rustc_interface/src/passes.rs`.
-- Rebuild, then run `check-swap.sh` and the sweeps before any timing.
+**To repeat it:**
+1. Fetch each master into its submodule.
+2. Check out the new commit.
+3. Run `git apply -3` with the patch.
+4. Regenerate the patch with `git diff`.
+5. Record the new submodule commits.
+6. Rebuild, then run `check-swap.sh` and the sweeps before any timing.
+
+Expect conflicts in `rustc_metadata` (`encoder.rs`, `creader.rs`,
+`locator.rs`) and `rustc_interface/src/passes.rs` once upstream touches
+them.
+
+meilisearch didn't compile with the old pin; it hasn't been retried.
 
 ### 9. The path upstream
 

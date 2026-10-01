@@ -30,7 +30,7 @@ index 210f04a11..51330df4e 100644
          }
      })
 diff --git a/compiler/rustc_hir_analysis/src/lib.rs b/compiler/rustc_hir_analysis/src/lib.rs
-index dbbf06818..7a54d9683 100644
+index c0abcc3a6..4d83e8c6a 100644
 --- a/compiler/rustc_hir_analysis/src/lib.rs
 +++ b/compiler/rustc_hir_analysis/src/lib.rs
 @@ -145,7 +145,14 @@ pub fn provide(providers: &mut Providers) {
@@ -61,10 +61,10 @@ index dbbf06818..7a54d9683 100644
          let def_kind = tcx.def_kind(item_def_id);
          // Make sure we evaluate all static and (non-associated) const items, even if unused.
 diff --git a/compiler/rustc_interface/src/passes.rs b/compiler/rustc_interface/src/passes.rs
-index da0ebce5b..621bab9f0 100644
+index 5ea1cb209..5b04cdc73 100644
 --- a/compiler/rustc_interface/src/passes.rs
 +++ b/compiler/rustc_interface/src/passes.rs
-@@ -892,6 +892,7 @@ pub fn write_interface<'tcx>(tcx: TyCtxt<'tcx>) {
+@@ -891,6 +891,7 @@ pub fn write_interface<'tcx>(tcx: TyCtxt<'tcx>) {
  
  pub static DEFAULT_QUERY_PROVIDERS: LazyLock<Providers> = LazyLock::new(|| {
      let providers = &mut Providers::default();
@@ -72,7 +72,7 @@ index da0ebce5b..621bab9f0 100644
      providers.queries.analysis = analysis;
      providers.queries.resolver_for_lowering_raw = resolver_for_lowering_raw;
      providers.queries.stripped_cfg_items = |tcx, _| &tcx.resolutions(()).stripped_cfg_items[..];
-@@ -1088,9 +1089,9 @@ pub fn emit_delayed_lints(tcx: TyCtxt<'_>) {
+@@ -1087,9 +1088,9 @@ pub fn emit_delayed_lints(tcx: TyCtxt<'_>) {
      }
  }
  
@@ -85,7 +85,7 @@ index da0ebce5b..621bab9f0 100644
      if tcx.sess.opts.unstable_opts.input_stats {
          rustc_passes::input_stats::print_hir_stats(tcx);
      }
-@@ -1143,7 +1144,16 @@ fn run_required_analyses(tcx: TyCtxt<'_>) {
+@@ -1144,7 +1145,16 @@ fn run_required_analyses(tcx: TyCtxt<'_>) {
          emit_delayed_lints(tcx);
      });
  
@@ -103,7 +103,7 @@ index da0ebce5b..621bab9f0 100644
      // Freeze definitions as we don't add new ones at this point.
      // We need to wait until now since we synthesize a by-move body
      // for all coroutine-closures.
-@@ -1281,6 +1291,79 @@ fn analysis(tcx: TyCtxt<'_>, (): ()) {
+@@ -1282,6 +1292,79 @@ fn analysis(tcx: TyCtxt<'_>, (): ()) {
      }
  }
  
@@ -183,7 +183,7 @@ index da0ebce5b..621bab9f0 100644
  /// Runs the codegen backend, after which the AST and analysis can
  /// be discarded.
  pub(crate) fn start_codegen<'tcx>(
-@@ -1311,6 +1394,23 @@ pub(crate) fn start_codegen<'tcx>(
+@@ -1312,6 +1395,23 @@ pub(crate) fn start_codegen<'tcx>(
  
      info!("Pre-codegen\n{:?}", tcx.debug_stats());
  
@@ -228,7 +228,7 @@ index 759297bc6..ae0153678 100644
          let _timing = sess.timings.section_guard(sess.dcx(), TimingSection::Linking);
          codegen_backend.link(
 diff --git a/compiler/rustc_metadata/src/creader.rs b/compiler/rustc_metadata/src/creader.rs
-index aea843ac0..b1eed4433 100644
+index 10693448e..cee5e3302 100644
 --- a/compiler/rustc_metadata/src/creader.rs
 +++ b/compiler/rustc_metadata/src/creader.rs
 @@ -1,7 +1,7 @@
@@ -318,7 +318,7 @@ index aea843ac0..b1eed4433 100644
      }
  
      pub fn all_proc_macro_def_ids(&self, tcx: TyCtxt<'_>) -> impl Iterator<Item = DefId> {
-@@ -1425,3 +1483,81 @@ fn visit_item(&mut self, item: &'ast ast::Item) {
+@@ -1435,3 +1493,81 @@ fn visit_item(&mut self, item: &'ast ast::Item) {
      visit::walk_crate(&mut f, krate);
      f.spans
  }
@@ -660,7 +660,7 @@ index 38da6561e..a5bc2c4e1 100644
  ///
  /// Used by rust-analyzer-proc-macro-srv.
 diff --git a/compiler/rustc_metadata/src/rmeta/decoder.rs b/compiler/rustc_metadata/src/rmeta/decoder.rs
-index 27b36c23d..1766fd77a 100644
+index 7dd920c7e..2fcff8152 100644
 --- a/compiler/rustc_metadata/src/rmeta/decoder.rs
 +++ b/compiler/rustc_metadata/src/rmeta/decoder.rs
 @@ -149,6 +149,12 @@ pub(crate) struct CrateMetadata {
@@ -795,7 +795,7 @@ index 154cf4f06..04b6e3616 100644
  
      dylib_dependency_formats => { cdata.get_dylib_dependency_formats(tcx) }
 diff --git a/compiler/rustc_metadata/src/rmeta/encoder.rs b/compiler/rustc_metadata/src/rmeta/encoder.rs
-index afa5646be..8622dafd3 100644
+index 40b61a52d..5faea35e4 100644
 --- a/compiler/rustc_metadata/src/rmeta/encoder.rs
 +++ b/compiler/rustc_metadata/src/rmeta/encoder.rs
 @@ -10,7 +10,7 @@
@@ -837,7 +837,7 @@ index afa5646be..8622dafd3 100644
          if self.is_proc_macro {
              for def_id in std::iter::once(CRATE_DEF_ID)
                  .chain(self.tcx.resolutions(()).proc_macros.iter().copied())
-@@ -711,13 +725,20 @@ macro_rules! stat {
+@@ -713,13 +727,20 @@ macro_rules! stat {
              stat!("exportable-items", || self.encode_stable_order_of_exportable_impls());
  
          // Encode exported symbols info. This is prefetched in `encode_metadata`.
@@ -860,7 +860,7 @@ index afa5646be..8622dafd3 100644
  
          // Encode the hygiene data.
          // IMPORTANT: this *must* be the last thing that we encode (other than `SourceMap`). The
-@@ -747,7 +768,13 @@ macro_rules! stat {
+@@ -749,7 +770,13 @@ macro_rules! stat {
                  },
  
                  stable_crate_id: tcx.stable_crate_id(LOCAL_CRATE),
@@ -875,7 +875,7 @@ index afa5646be..8622dafd3 100644
                  panic_in_drop_strategy: tcx.sess.opts.unstable_opts.panic_in_drop,
                  edition: tcx.sess.edition(),
                  has_global_allocator: tcx.has_global_allocator(LOCAL_CRATE),
-@@ -800,7 +827,17 @@ macro_rules! stat {
+@@ -802,7 +829,17 @@ macro_rules! stat {
          // By default the crate hash (SVH) is derived from the encoded metadata bytes. With
          // `-Z metadata-crate-hash=no` we instead store the legacy HIR-based hash, which the
          // `crate_hash` query computes directly without consulting `local_crate_hash`.
@@ -894,7 +894,7 @@ index afa5646be..8622dafd3 100644
              self.opaque.flush();
              Svh::new(Fingerprint::from_le_bytes(
                  self.metadata_hasher.lock().unwrap().finish_128().to_le_bytes(),
-@@ -808,7 +845,9 @@ macro_rules! stat {
+@@ -810,7 +847,9 @@ macro_rules! stat {
          } else {
              tcx.crate_hash(LOCAL_CRATE)
          };
@@ -905,7 +905,7 @@ index afa5646be..8622dafd3 100644
  
          let unhashed = stat!("final", || {
              // Indexed by dependency `CrateNum`, matching the numbering `encode_crate_deps` uses.
-@@ -1456,248 +1495,261 @@ fn encode_def_ids(&mut self) {
+@@ -1458,248 +1497,261 @@ fn encode_def_ids(&mut self) {
  
          let tcx = self.tcx;
  
@@ -1389,7 +1389,7 @@ index afa5646be..8622dafd3 100644
          }
      }
  
-@@ -1859,77 +1911,256 @@ fn encode_precise_capturing_args(&mut self, def_id: DefId) {
+@@ -1861,77 +1913,256 @@ fn encode_precise_capturing_args(&mut self, def_id: DefId) {
          record_array!(self.tables.rendered_precise_capturing_args[def_id] <- precise_capturing_args);
      }
  
@@ -1697,7 +1697,7 @@ index afa5646be..8622dafd3 100644
              && tcx.sess.opts.optimize != OptLevel::No
              && tcx.sess.opts.incremental.is_none()
          {
-@@ -2401,6 +2632,27 @@ fn prefetch_mir(tcx: TyCtxt<'_>) {
+@@ -2403,6 +2634,27 @@ fn prefetch_mir(tcx: TyCtxt<'_>) {
      })
  }
  
@@ -1725,7 +1725,7 @@ index afa5646be..8622dafd3 100644
  // NOTE(eddyb) The following comment was preserved for posterity, even
  // though it's no longer relevant as EBML (which uses nested & tagged
  // "documents") was replaced with a scheme that can't go out of bounds.
-@@ -2543,13 +2795,17 @@ pub fn encode_metadata(tcx: TyCtxt<'_>, path: &Path, ref_path: Option<&Path>) {
+@@ -2545,13 +2797,17 @@ pub fn encode_metadata(tcx: TyCtxt<'_>, path: &Path, ref_path: Option<&Path>) {
          let owned = slice_owned(mmap, Deref::deref);
          let blob = MetadataBlob::new(owned);
          let hash = blob.expect("file already created").get_crate_hash();
@@ -1745,7 +1745,7 @@ index afa5646be..8622dafd3 100644
                  let header: LazyValue<CrateHeader> = ecx.lazy(CrateHeader {
                      name: tcx.crate_name(LOCAL_CRATE),
                      triple: tcx.sess.opts.target_triple.clone(),
-@@ -2582,7 +2838,7 @@ pub fn encode_metadata(tcx: TyCtxt<'_>, path: &Path, ref_path: Option<&Path>) {
+@@ -2584,7 +2840,7 @@ pub fn encode_metadata(tcx: TyCtxt<'_>, path: &Path, ref_path: Option<&Path>) {
          dep_node,
          tcx,
          || {
@@ -1754,7 +1754,7 @@ index afa5646be..8622dafd3 100644
                  // Encode all the entries and extra information in the crate,
                  // culminating in the `CrateRoot` which points to all of it.
                  let (root, unhashed) = ecx.encode_crate_root();
-@@ -2606,7 +2862,7 @@ pub fn encode_metadata(tcx: TyCtxt<'_>, path: &Path, ref_path: Option<&Path>) {
+@@ -2608,7 +2864,7 @@ pub fn encode_metadata(tcx: TyCtxt<'_>, path: &Path, ref_path: Option<&Path>) {
      if let Some(ref_path) = ref_path {
          let _prof_timer = tcx.prof.verbose_generic_activity("generate_crate_metadata_stub");
  
@@ -1763,7 +1763,7 @@ index afa5646be..8622dafd3 100644
              let header: LazyValue<CrateHeader> = ecx.lazy(CrateHeader {
                  name: tcx.crate_name(LOCAL_CRATE),
                  triple: tcx.sess.opts.target_triple.clone(),
-@@ -2618,9 +2874,28 @@ pub fn encode_metadata(tcx: TyCtxt<'_>, path: &Path, ref_path: Option<&Path>) {
+@@ -2620,9 +2876,28 @@ pub fn encode_metadata(tcx: TyCtxt<'_>, path: &Path, ref_path: Option<&Path>) {
      }
  }
  
@@ -1792,7 +1792,7 @@ index afa5646be..8622dafd3 100644
      f: impl FnOnce(&mut EncodeContext<'_, '_>) -> (usize, usize),
  ) {
      // By default the crate hash (SVH) is computed from the bytes of the encoded metadata,
-@@ -2691,6 +2966,10 @@ fn with_encode_metadata_header(
+@@ -2693,6 +2968,10 @@ fn with_encode_metadata_header(
          is_proc_macro: tcx.crate_types().contains(&CrateType::ProcMacro),
          hygiene_ctxt: Default::default(),
          symbol_index_table: Default::default(),
@@ -1804,7 +1804,7 @@ index afa5646be..8622dafd3 100644
  
      // Encode the rustc version string in a predictable location.
 diff --git a/compiler/rustc_metadata/src/rmeta/mod.rs b/compiler/rustc_metadata/src/rmeta/mod.rs
-index e3f3257ac..afa845eac 100644
+index b70151604..6e5c1bcab 100644
 --- a/compiler/rustc_metadata/src/rmeta/mod.rs
 +++ b/compiler/rustc_metadata/src/rmeta/mod.rs
 @@ -6,7 +6,7 @@
@@ -1839,7 +1839,7 @@ index ddaf12f98..9b0e3ac58 100644
      query analysis(key: ()) {
          eval_always
 diff --git a/compiler/rustc_middle/src/ty/context.rs b/compiler/rustc_middle/src/ty/context.rs
-index 5cd7322ce..b76b88ca8 100644
+index b6e204dd5..95418525f 100644
 --- a/compiler/rustc_middle/src/ty/context.rs
 +++ b/compiler/rustc_middle/src/ty/context.rs
 @@ -1372,7 +1372,19 @@ pub fn create_crate_num(
@@ -1884,10 +1884,10 @@ index 5cd7322ce..b76b88ca8 100644
          // Depend on the `analysis` query to ensure compilation if finished.
          self.ensure_ok().analysis(());
 diff --git a/compiler/rustc_session/src/options.rs b/compiler/rustc_session/src/options.rs
-index 0e0671301..93cfeb52a 100644
+index 4c153cbb8..979407d88 100644
 --- a/compiler/rustc_session/src/options.rs
 +++ b/compiler/rustc_session/src/options.rs
-@@ -2492,6 +2492,13 @@ pub(crate) fn parse_rust_version(slot: &mut Option<RustcVersion>, v: Option<&str
+@@ -2513,6 +2513,13 @@ pub(crate) fn parse_rust_version(slot: &mut Option<RustcVersion>, v: Option<&str
      eagerly_emit_delayed_bugs: bool = (false, parse_bool, [UNTRACKED],
          "emit delayed bugs eagerly as errors instead of stashing them and emitting \
          them only if an error has not been emitted"),

@@ -47,7 +47,7 @@ slower. With the parallel front end (`-Zthreads=8`), which covers some
 of the same ground, it adds up to 25%. Those are 16-core numbers. The
 gain comes from cores the build would leave idle, so it shrinks on
 smaller machines. On 4 cores, rust-analyzer's check is 24% faster and
-its build 15%, and wide builds come out even.
+its build 13–15%, and wide builds come out even.
 
 How it works, what early metadata leaves out, and the risks:
 [docs/design.md](docs/design.md). Measurements:

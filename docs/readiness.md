@@ -90,14 +90,20 @@ cargo build.
    - Inside `make -j`, that breaks the jobserver's contract, not just
      cargo's count. It was a deliberate choice (waiting for a token starved
      the critical path), and it needs defending or bounding.
-5. **Memory.**
+5. **CPU overhead on a saturated machine.** With no idle core to fill,
+   the same build spends 3–7% more rustc CPU time with headstart: the
+   early write, plus more compilations competing for cache and memory
+   (bevy and typst on 4 cores). That's why wide builds come out even
+   rather than slightly ahead. Expect a question on whether cargo should
+   hold back when the machine is already full (next-steps item 1).
+6. **Memory.**
    - Paused compilers stay resident, and cargo doesn't cap them.
    - The only peak-memory numbers (−4% to +39%) are from the first,
      check-only version.
-6. **The swapped crate keeps two copies of its source files** in the
+7. **The swapped crate keeps two copies of its source files** in the
    `SourceMap`, under the same stable ID. Expect questions about debuginfo
    and incremental span encoding.
-7. **`--json=artifacts` gains three notification kinds:**
+8. **`--json=artifacts` gains three notification kinds:**
    `early-metadata`, `wait-metadata` and `resume`. That interface is
    semi-stable, and other build tools parse it.
 
@@ -120,8 +126,10 @@ Two bugs in the cargo patch, found by review:
 
 In order:
 
-1. **Rebase onto current rust-lang/rust and cargo master.** The pins are
-   months old (next-steps item 8).
+1. **Keep the rebase current.** Both patches were rebased onto the
+   2026-10-01 masters without conflicts, and the results held (results.md,
+   "After rebasing onto current master"). Rebase again right before
+   posting.
 2. **Split the rustc patch into a commit series** that reads on its own:
    - Move the encoder loop bodies into `encode_def_id` and
      `encode_mir_for`. This is a pure refactor; `git diff -w` shows about
