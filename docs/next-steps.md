@@ -17,6 +17,12 @@ at the end of the round that added the real-project measurements
   overlaps. On top of it, headstart adds up to 25% on real projects, and
   up to 32% on rustc-perf. Three real-project results are within noise
   of even (−1% to −2%).
+- **Reproduced on a 4-core container** (see results.md): smaller gains,
+  as expected with fewer idle cores.
+  - rust-analyzer: 24% for check, 15% for build.
+  - Nothing meaningfully slower.
+  - [readiness.md](readiness.md) assesses whether it's ready to bring to
+    the compiler and cargo teams.
 - **Correctness evidence:**
   - Sweeps of all 53 rustc-perf benchmarks with `-Zearly-metadata-verify`:
     debug, release and `-Zthreads=8`, in check and build.
@@ -54,6 +60,8 @@ scripts that lived in its `/tmp` are now `scripts/sweep.sh` and
 - **Network:** GitHub, crates.io, and rustc's CI LLVM download
   (`download-ci-llvm = true` in `config/bootstrap.toml`).
 - **Toolchains:** rustup with Rust 1.98.0, which builds the pinned cargo.
+- **`rsync`**, which `bench.sh` uses to copy each project. The Claude Code
+  container didn't have it.
 - **System packages** for the real projects: `cmake clang pkg-config
   protobuf-compiler nasm perl`, plus the dev packages for OpenSSL, SQLite,
   libpq, ALSA, libudev, X11, xkbcommon, Wayland, fontconfig, freetype and
@@ -84,6 +92,28 @@ and standard library only. A rebuild after editing the patch takes about
 | real-project timing | `scripts/bench.sh -n 3 -c check $(scripts/real-projects.sh ~/hs-real)` | 1–4 h per pass |
 | rustc UI suite | `(cd rustc && ./x test --stage 1 tests/ui)` | ~3 min |
 | cargo test suite | `(cd cargo && cargo +1.98.0 test --no-fail-fast)` (see SIGINT below) | ~3 min |
+
+**Lessons from the Claude Code container** (4 cores, 15 GB RAM, ~30 GB
+of disk):
+
+- **The container is reclaimed when the session goes idle,** which kills
+  detached benchmark runs. Keep the session active while one runs, and
+  use a driver that skips finished work.
+  - Results under `results/` survived both restarts.
+  - Write one `bench.sh` out-dir per project, so a restart costs one
+    project's runs, not the whole pass.
+- **Absolute times move between restarts** (about 20% after the second
+  one), so compare off and on within a session only. `bench.sh` already
+  does.
+- **Disk:**
+  - The compiler build with `incremental = false` is 4.2 GB.
+  - The registry for rust-analyzer, six real projects and the rustc-perf
+    set is 4 GB.
+  - bevy's debug build peaked at about 11 GB.
+  - helix's work copy holds 2.5 GB of compiled grammars.
+  - polars, zed and lemmy don't fit.
+- **One-time build-script work** outside `target` (helix's grammars) lands
+  on the first timed run. Use `bench.sh -w` for real projects.
 
 **Lessons from the VM:**
 
@@ -143,12 +173,17 @@ that crowds the critical path:
 
 ### 2. Fewer cores
 
-**Problem.** Every timing so far uses 16 jobs. Laptops have 8–12 cores,
-and the machine saturates sooner there, so there's less idle time for
-headstart to fill.
+**Problem.** Laptops have 8–12 cores. The machine saturates sooner there,
+so there's less idle time for headstart to fill.
 
-**How:** `bench.sh -j 8` and `-j 4` on the rustc-perf set and a few real
-projects, with and without `-Zthreads`.
+**Done at 4 jobs** (results.md, "Reproduction on 4 cores"):
+- rust-analyzer saves 24% for check and 15% for build.
+- The rustc-perf set saves 1–35%.
+- Wide real projects come out even (lldap, typst, bevy: −1% to +4%).
+- The schedules show 4 cores nearly saturated with headstart on.
+
+**Still to do:** `bench.sh -j 8` on the same set, the common laptop size,
+and `-Zthreads` at 4 and 8 jobs.
 
 ### 3. Memory
 

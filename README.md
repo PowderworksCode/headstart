@@ -44,11 +44,15 @@ On rustc's default front end, headstart makes clean builds of 13 real
 projects (rust-analyzer, zed, bevy, lemmy, polars and others) up to 54%
 faster for `cargo check`, and up to 42% for `cargo build`. None is
 slower. With the parallel front end (`-Zthreads=8`), which covers some
-of the same ground, it adds up to 25%.
+of the same ground, it adds up to 25%. Those are 16-core numbers. The
+gain comes from cores the build would leave idle, so it shrinks on
+smaller machines. On 4 cores, rust-analyzer's check is 24% faster and
+its build 15%, and wide builds come out even.
 
 How it works, what early metadata leaves out, and the risks:
 [docs/design.md](docs/design.md). Measurements:
-[docs/results.md](docs/results.md).
+[docs/results.md](docs/results.md). Whether it's ready to bring to the
+compiler and cargo teams: [docs/readiness.md](docs/readiness.md).
 
 ## Try it
 

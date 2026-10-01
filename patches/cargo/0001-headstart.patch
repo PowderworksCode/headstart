@@ -1,8 +1,8 @@
 diff --git a/src/compiler/build_runner/mod.rs b/src/compiler/build_runner/mod.rs
-index 4bf69f6..5bb5e02 100644
+index 4bf69f6..61fe88d 100644
 --- a/src/compiler/build_runner/mod.rs
 +++ b/src/compiler/build_runner/mod.rs
-@@ -763,6 +763,15 @@ impl<'a, 'gctx> BuildRunner<'a, 'gctx> {
+@@ -763,6 +763,22 @@ impl<'a, 'gctx> BuildRunner<'a, 'gctx> {
      /// Returns whether when `parent` depends on `dep` if it only requires the
      /// metadata file from `dep`.
      pub fn only_requires_rmeta(&self, parent: &Unit, dep: &Unit) -> bool {
@@ -15,10 +15,17 @@ index 4bf69f6..5bb5e02 100644
 +        if headstart() && headstart_starts_early(parent, dep) {
 +            return true;
 +        }
++        self.only_requires_rmeta_file(parent, dep)
++    }
++
++    /// Returns whether `parent`'s output depends only on `dep`'s metadata
++    /// file, so that only its mtime matters for freshness. Headstart starts
++    /// more units on metadata, but a unit that links still uses the rlib.
++    pub fn only_requires_rmeta_file(&self, parent: &Unit, dep: &Unit) -> bool {
          // We're only a candidate for requiring an `rmeta` file if we
          // ourselves are building an rlib,
          !parent.requires_upstream_objects()
-@@ -773,6 +782,13 @@ impl<'a, 'gctx> BuildRunner<'a, 'gctx> {
+@@ -773,6 +789,13 @@ impl<'a, 'gctx> BuildRunner<'a, 'gctx> {
              && dep.mode == CompileMode::Build
      }
  
@@ -32,7 +39,7 @@ index 4bf69f6..5bb5e02 100644
      /// Returns whether when `unit` is built whether it should emit metadata as
      /// well because some compilations rely on that.
      pub fn rmeta_required(&self, unit: &Unit) -> bool {
-@@ -816,3 +832,25 @@ impl<'a, 'gctx> BuildRunner<'a, 'gctx> {
+@@ -816,3 +839,25 @@ impl<'a, 'gctx> BuildRunner<'a, 'gctx> {
          }
      }
  }
@@ -58,6 +65,19 @@ index 4bf69f6..5bb5e02 100644
 +        std::sync::LazyLock::new(|| std::env::var_os("CARGO_HEADSTART").is_some_and(|v| v == "1"));
 +    *ON
 +}
+diff --git a/src/compiler/fingerprint/mod.rs b/src/compiler/fingerprint/mod.rs
+index ebaa5c3..425c393 100644
+--- a/src/compiler/fingerprint/mod.rs
++++ b/src/compiler/fingerprint/mod.rs
+@@ -1461,7 +1461,7 @@ impl DepFingerprint {
+             name: dep.extern_crate_name,
+             public: dep.public,
+             fingerprint,
+-            only_requires_rmeta: build_runner.only_requires_rmeta(parent, &dep.unit),
++            only_requires_rmeta: build_runner.only_requires_rmeta_file(parent, &dep.unit),
+         })
+     }
+ }
 diff --git a/src/compiler/job_queue/job_state.rs b/src/compiler/job_queue/job_state.rs
 index b866821..e4f2649 100644
 --- a/src/compiler/job_queue/job_state.rs
@@ -131,7 +151,7 @@ index b866821..e4f2649 100644
          self.messages
              .push(Message::Finish(self.id, Artifact::Metadata, Ok(())));
 diff --git a/src/compiler/job_queue/mod.rs b/src/compiler/job_queue/mod.rs
-index a581e11..1b7b30b 100644
+index a581e11..a1c566a 100644
 --- a/src/compiler/job_queue/mod.rs
 +++ b/src/compiler/job_queue/mod.rs
 @@ -210,6 +210,43 @@ struct DrainState<'gctx> {
@@ -324,15 +344,19 @@ index a581e11..1b7b30b 100644
                      Err(_) if build_runner.bcx.unit_can_fail_for_docscraping(&unit) => {
                          build_runner
                              .failed_scrape_units
-@@ -728,6 +775,7 @@ impl<'gctx> DrainState<'gctx> {
+@@ -726,8 +773,11 @@ impl<'gctx> DrainState<'gctx> {
+                             .unwrap()
+                             .insert(build_runner.files().metadata(&unit).unit_id());
                          self.queue.finish(&unit, &artifact);
++                        // Its dependents run as if it had succeeded.
++                        self.settle(build_runner, id, true);
                      }
                      Err(error) => {
 +                        self.settle(build_runner, id, false);
                          let show_warnings = true;
                          self.emit_log_messages(&unit, build_runner, show_warnings)?;
                          self.back_compat_notice(build_runner, &unit)?;
-@@ -762,11 +810,188 @@ impl<'gctx> DrainState<'gctx> {
+@@ -762,11 +812,198 @@ impl<'gctx> DrainState<'gctx> {
              Message::SectionTiming(id, section) => {
                  self.timings.unit_section_timing(build_runner, id, &section);
              }
@@ -411,13 +435,23 @@ index a581e11..1b7b30b 100644
 +            return Some(event);
 +        }
 +        match event {
-+            Message::Finish(id, _, result) => {
++            Message::Finish(id, _, mut result) => {
 +                // Free the job slot and unblock dependents now; only the
 +                // report waits.
 +                let unit = self.active.remove(&id).unwrap();
 +                self.paused.remove(&id);
 +                self.finished += 1;
-+                if result.is_ok() {
++                // As in `handle_event`: a scrape unit may fail, and its
++                // dependents still run.
++                if result.is_err() && build_runner.bcx.unit_can_fail_for_docscraping(&unit) {
++                    build_runner
++                        .failed_scrape_units
++                        .lock()
++                        .unwrap()
++                        .insert(build_runner.files().metadata(&unit).unit_id());
++                    self.queue.finish(&unit, &Artifact::All);
++                    result = Ok(());
++                } else if result.is_ok() {
 +                    if let Err(error) = self.finish(id, &unit, Artifact::All, build_runner) {
 +                        self.provisional.released_errors.push(error.into());
 +                    }
@@ -521,7 +555,7 @@ index a581e11..1b7b30b 100644
      // This will also tick the progress bar as appropriate
      fn wait_for_events(&mut self) -> Vec<Message> {
          // Drain all events at once to avoid displaying the progress bar
-@@ -779,7 +1004,7 @@ impl<'gctx> DrainState<'gctx> {
+@@ -779,7 +1016,7 @@ impl<'gctx> DrainState<'gctx> {
          if events.is_empty() {
              loop {
                  self.tick_progress();
@@ -530,7 +564,7 @@ index a581e11..1b7b30b 100644
                  match self.messages.pop(Duration::from_millis(500)) {
                      Some(message) => {
                          events.push(message);
-@@ -843,6 +1068,9 @@ impl<'gctx> DrainState<'gctx> {
+@@ -843,6 +1080,9 @@ impl<'gctx> DrainState<'gctx> {
                  if let Err(event_err) = self.handle_event(build_runner, event) {
                      self.handle_error(&mut build_runner.bcx.gctx.shell(), &mut errors, event_err);
                  }
@@ -540,7 +574,7 @@ index a581e11..1b7b30b 100644
              }
          }
          self.progress.clear();
-@@ -926,7 +1154,13 @@ impl<'gctx> DrainState<'gctx> {
+@@ -926,7 +1166,13 @@ impl<'gctx> DrainState<'gctx> {
          let new_err = new_err.into();
          if new_err.print_always || err_state.count == 0 {
              crate::display_error(&new_err.error, shell);
@@ -555,7 +589,7 @@ index a581e11..1b7b30b 100644
                  self.progress.indicate_error();
                  let _ = shell.warn("build failed, waiting for other jobs to finish...");
              }
-@@ -1003,6 +1237,22 @@ impl<'gctx> DrainState<'gctx> {
+@@ -1003,6 +1249,22 @@ impl<'gctx> DrainState<'gctx> {
          debug!("start {}: {:?}", id, unit);
  
          assert!(self.active.insert(id, unit.clone()).is_none());
@@ -578,7 +612,7 @@ index a581e11..1b7b30b 100644
  
          let messages = self.messages.clone();
          let is_fresh = job.freshness().is_fresh();
-@@ -1078,7 +1328,12 @@ impl<'gctx> DrainState<'gctx> {
+@@ -1078,7 +1340,12 @@ impl<'gctx> DrainState<'gctx> {
          let count = self.warning_count.entry(id).or_default();
          count.total += 1;
          if lint {

@@ -3,7 +3,7 @@
 # without headstart, alternating, with the same patched rustc and cargo
 # (headstart off = upstream behavior):
 #
-#   scripts/bench.sh [-n runs] [-j jobs] [-c check|build] [-o out-dir] <project dir>[::cargo args]...
+#   scripts/bench.sh [-n runs] [-j jobs] [-c check|build] [-o out-dir] [-w] <project dir>[::cargo args]...
 #
 # For example, `vaultwarden::--features sqlite`.
 #
@@ -12,12 +12,16 @@
 # per-rustc schedule and the diagnostics under <out-dir>/schedules/. Prints
 # a table of medians, and any project whose diagnostics differ between
 # modes.
+#
+# -w does one untimed build first, for projects whose build scripts do
+# one-time work outside `target` (helix compiles its tree-sitter grammars
+# into the source tree); without it, the first timed run pays for it.
 set -uo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"
-runs=5 jobs=$(sysctl -n hw.ncpu 2>/dev/null || nproc) out= command=check
-while getopts n:j:o:c: opt; do
+runs=5 jobs=$(sysctl -n hw.ncpu 2>/dev/null || nproc) out= command=check warmup=
+while getopts n:j:o:c:w opt; do
   case $opt in
-    n) runs=$OPTARG ;; j) jobs=$OPTARG ;; o) out=$OPTARG ;; c) command=$OPTARG ;;
+    n) runs=$OPTARG ;; j) jobs=$OPTARG ;; o) out=$OPTARG ;; c) command=$OPTARG ;; w) warmup=1 ;;
     *) exit 2 ;;
   esac
 done
@@ -25,7 +29,7 @@ shift $((OPTIND - 1))
 # A new directory per run by default: an existing runs.tsv is appended to,
 # and its medians cover every row.
 out=${out:-$root/results/$(date +%F-%H%M%S)-$command}
-[ $# -gt 0 ] || { echo "usage: $0 [-n runs] [-j jobs] [-c check|build] [-o out-dir] <project dir>[::cargo args]..." >&2; exit 2; }
+[ $# -gt 0 ] || { echo "usage: $0 [-n runs] [-j jobs] [-c check|build] [-o out-dir] [-w] <project dir>[::cargo args]..." >&2; exit 2; }
 
 export RUSTC=$root/rustc/build/host/stage1/bin/rustc
 export RUSTC_WRAPPER=$root/scripts/log-rustc
@@ -41,6 +45,10 @@ for spec in "$@"; do
   name=$(basename "$src")
   rsync -a --delete --exclude target "$src/" "$out/work/$name/"
   (cd "$out/work/$name" && "$cargo" fetch -q) || { echo "$name: fetch failed" >&2; continue; }
+  if [ -n "$warmup" ]; then
+    (cd "$out/work/$name" && "$cargo" "$command" -q -j "$jobs" --offline $args >/dev/null 2>&1)
+    echo "$name warm-up: exit $?"
+  fi
   for run in $(seq "$runs"); do
     for mode in off on; do
       rm -rf "$out/work/$name/target"
