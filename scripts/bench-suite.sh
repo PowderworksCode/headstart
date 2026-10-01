@@ -7,7 +7,9 @@
 # - the 21 rustc-perf benchmarks of results.md, check and build, 3 runs;
 # - the other 12 real projects of scripts/real-projects.sh (cloned into
 #   <projects-dir>, default ~/hs-real), check and build, 3 runs, with a
-#   warm-up build each.
+#   warm-up build each;
+# - codex-rs (scripts/setup-codex.sh), the same way. Its `cargo build`
+#   needs more than 15 GB of RAM.
 #
 # Each benchmark gets its own `bench.sh` out-dir under <out-dir>, and one
 # that already has all its runs is skipped, so the suite can be rerun after
@@ -66,6 +68,10 @@ for command in check build; do
     name=$(basename "${spec%%::*}")
     bench "$name" 3 $command "$spec" -w
   done
+done
+codex=$("$root/scripts/setup-codex.sh" "$projects")
+for command in check build; do
+  (source "$projects/codex/headstart.env" && bench codex-rs 3 $command "$codex" -w)
 done
 mark "done"
 

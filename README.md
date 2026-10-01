@@ -52,7 +52,7 @@ slower. With the parallel front end (`-Zthreads=8`), which covers some
 of the same ground, it adds up to 25%. Those are 16-core numbers. The
 gain comes from cores the build would leave idle, so it shrinks on
 smaller machines. On 4 cores, rust-analyzer's check is 24% faster and
-its build 13–15%, and wide builds come out even.
+its build 13–15%, codex-rs's check 14%, and wide builds come out even.
 
 How it works, what early metadata leaves out, and the risks:
 [docs/design.md](docs/design.md). Measurements:
@@ -120,13 +120,18 @@ at the commits measured, and prints them in that form:
 scripts/bench.sh -n 3 -c build $(scripts/real-projects.sh ~/hs-real)
 ```
 
+`scripts/setup-codex.sh <dir>` does the same for codex-rs, which needs a
+patched dependency and codex's prebuilt V8 (see the script); source
+`<dir>/codex/headstart.env` before timing it.
+
 `-w` adds an untimed warm-up build per project, for build scripts that do
 one-time work outside `target` (helix compiles its grammars into its
 source tree).
 
 `scripts/bench-suite.sh <out-dir>` runs the whole suite of
 [docs/results.md](docs/results.md) on the current machine: rust-analyzer,
-the 21 rustc-perf benchmarks and the other real projects, check and build.
+the 21 rustc-perf benchmarks, the other real projects and codex-rs, check
+and build.
 It keeps each benchmark's results separately and skips finished ones, so
 it can be restarted, and writes a summary table at the end. It's how to
 get the numbers for a machine size not measured yet, such as 8 cores.
