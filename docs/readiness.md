@@ -40,6 +40,7 @@ Not yet ready to merge.**
   twice (before and after the rebase):
   - All 21 rustc-perf benchmarks are faster by median.
   - rust-analyzer, helix and wasmtime are faster in check and build.
+  - codex-rs (openai/codex, 1,379 compilations) checks 14% faster.
   - Wide builds (typst, lldap, bevy) are within noise of even.
   - Diagnostics were identical in every successful build.
 - **The gain scales with the cores the build leaves idle.**
@@ -104,6 +105,9 @@ cargo build.
    - Paused compilers stay resident, and cargo doesn't cap them.
    - The only peak-memory numbers (−4% to +39%) are from the first,
      check-only version.
+   - codex-rs shows why it matters. Its debug `cargo build` doesn't fit
+     in 15 GB even without headstart (`codex-core`'s rustc alone reached
+     13.7 GB), and headstart keeps more compilations resident.
 6. **The swapped crate keeps two copies of its source files** in the
    `SourceMap`, under the same stable ID. Expect questions about debuginfo
    and incremental span encoding.
@@ -141,6 +145,11 @@ cargo build.
     while the dependency holds the rlib's lock, so `--emit=obj,metadata`
     builds against it work again. The link-time wait only runs when
     linking.
+
+  codex-rs then caught a regression in the last fix: a dependency
+  compiled earlier in the build has no lock but does have its rlib. The
+  loader now expects an rlib if either exists, and the run-make test
+  covers it.
 
   What remains is cosmetic, and only for crates with errors. An error in
   an interface body is reported before errors in other bodies (3 tests
@@ -190,7 +199,7 @@ cargo build.
    current series. The 16-core numbers predate the last fixes and the
    cleanup, and 8 cores is the common laptop size.
 2. **Measure memory and error delay** on the current version
-   (next-steps items 3 and 10).
+   (next-steps items 3 and 10), starting with codex-rs's `cargo build`.
 3. **Write the Zulip post and the MCP.** They should state:
    - the swap invariant;
    - the notification protocol and the lock files;

@@ -119,6 +119,10 @@ of disk):
   - bevy's debug build peaked at about 11 GB.
   - helix's work copy holds 2.5 GB of compiled grammars.
   - polars, zed and lemmy don't fit.
+- **Memory: 15 GB, no swap.** codex-rs's debug `cargo build` doesn't
+  fit: `codex-core`'s rustc was OOM-killed at 13.7 GB, headstart off. The
+  OOM killer can also take the session's shell, which looks like the
+  container restarting. Its `cargo check` fits.
 - **One-time build-script work** outside `target` (helix's grammars) lands
   on the first timed run. Use `bench.sh -w` for real projects.
 
@@ -201,6 +205,8 @@ check-only version: −4% to +39%.
 **How:**
 - Run `scripts/bench-mem.sh` on `cargo build` for the real projects (zed,
   lemmy and polars are the likely maxima).
+- codex-rs's `cargo build` (`scripts/setup-codex.sh`) is the first
+  candidate: without headstart, one of its compilations reaches 13.7 GB.
 - If peaks matter, cap the number of paused jobs in cargo (e.g. at
   `-j`), and don't start new units past the cap.
 

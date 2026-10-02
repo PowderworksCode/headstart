@@ -19,7 +19,10 @@ their timing tables are superseded by the current ones.
 
 "Reproduction on 4 cores" reruns most of it on a 4-core container, and
 "After rebasing onto current master" reruns that on the rebased
-patches. The sections after them are from the 16-core VM.
+patches. "The final series" validates and times the patches as they
+are now, after the cleanup, the output locks and the fixes the forced UI
+run found, and adds codex-rs. The sections after them are from the
+16-core VM.
 
 ## Correctness (current version)
 
@@ -77,6 +80,131 @@ The sweeps found two bugs in the swap to full metadata, both fixed:
   it looked older than this compilation's early metadata. Writing early
   metadata now deletes the crate's stale full metadata and rlib first,
   so a full file next to early metadata is never an older one.
+
+## The final series: 4 cores
+
+The six rustc and three cargo commits in [patches/](../patches), as they
+are now, on the same 4-core container, against the same masters
+(rust-lang/rust `6006fd0`, cargo `4f3fb24`). Since "After rebasing onto
+current master" below, the patches gained the output locks (instead of polling), `-Zheadstart`, the
+commit split, and the fixes from the forced UI run.
+
+### Correctness
+
+- **Sweeps** (`scripts/sweep.sh`, `-Zearly-metadata-verify`): `cargo
+  check` and `cargo build`, each in debug and release. 106 builds each,
+  424 in all: every benchmark builds in both modes with identical
+  diagnostics (stm32f4 fails in both, as before), and verify reports
+  nothing.
+- **`check-errors.sh`:** all 12 scenarios the same in both modes.
+- **`check-incremental.sh check` and `build`:** every step matches, and
+  the final state matches a clean build.
+- **`check-swap.sh`,** now holding the output locks itself: the swap
+  gives the same program at every opt-level, and a dependency failing
+  after its early write stops the dependent with "a dependency failed to
+  compile after writing early metadata".
+- **In-tree tests:** `tests/run-make/early-metadata` and
+  `tests/ui/rmeta` pass.
+- **rustc's UI suite, flag off:** 22172 passed, 0 failed, 262 ignored.
+- **rustc's UI suite with `-Zearly-metadata -Zearly-metadata-verify`
+  forced on for every test:** 22168 passed, 4 failed. All four differ
+  only in output that depends on when bodies are checked:
+  - `asm/naked-asm-outside-naked-fn.rs`,
+    `consts/qualif-indirect-mutation-fail.rs` and
+    `force-inlining/deny-async.rs` report the same errors in another
+    order;
+  - `treat-err-as-bug/err.rs`, a deliberate ICE, shows the early write in
+    its query stack.
+
+  The first forced run found three bug classes, all fixed (see
+  [readiness.md](readiness.md#done-since-the-first-review)): an ICE on
+  errors in interface bodies (17 tests), async closures' by-move bodies
+  created too early and in parallel (2 tests), and waiting for an rlib a
+  metadata-only dependency never writes (3 tests).
+- **codex-rs** found a regression in that last fix before the timing
+  runs: the loader expected an rlib only while its lock existed, so a
+  dependency already compiled earlier in the build (`version_check`,
+  "required to be available in rlib format") was missed. It now expects
+  one if the lock exists or the rlib already does, and
+  `tests/run-make/early-metadata` covers it.
+
+### rust-analyzer, 5 runs
+
+| | today | headstart | saved | today range | headstart range | after rebase |
+|---|--:|--:|--:|--:|--:|--:|
+| `cargo check` | 93.20 s | 70.81 s | 24% | 90.93–95.56 | 70.50–71.13 | 24% |
+| `cargo build` | 153.54 s | 130.50 s | 15% | 150.62–154.13 | 128.18–133.18 | 13% |
+
+### codex-rs, 3 runs, with a warm-up build
+
+[openai/codex](https://github.com/openai/codex) `57a38c1` (2026-10-01),
+the `codex-rs` workspace: 1,379 compilations, ending in a long chain
+through `codex-core`, `codex-app-server` and `codex-tui`.
+`scripts/setup-codex.sh` sets it up; three things differ from upstream:
+
+- `allocative` 0.3.6 is patched to drop `impl Allocative for !`, which
+  conflicts with `Infallible` now that it's `!` on rustc 1.101-dev
+  (E0119). That's codex's problem on any current nightly, not
+  headstart's.
+- V8 comes from codex's prebuilt release, checksummed as its CI does.
+- `codex-voice-host` is excluded: it needs GStreamer ≥ 1.28.
+
+| | today | headstart | saved | today range | headstart range |
+|---|--:|--:|--:|--:|--:|
+| `cargo check` | 475.92 s | 409.11 s | 14% | 461.51–487.90 | 384.81–415.59 |
+| `cargo build` | doesn't fit | | | | |
+
+- **Check:** 14%, with separated ranges and identical diagnostics. The
+  schedules average 2.6 compilations running without headstart and 3.1
+  with it. The build ends in a serial tail that headstart can shorten but
+  not remove: `codex-core` alone takes about 95 s, then
+  `codex-app-server` 28 s and `codex-tui` 49 s.
+- **Build doesn't fit in this container's 15 GB.** Without headstart, at
+  `-j4`, `codex-core`'s rustc was killed by the OOM killer at 13.7 GB
+  resident, with `debug = 0` and incremental off. With headstart, more
+  compilations are resident at once, so it would need more still. It
+  needs a bigger machine (`scripts/bench-suite.sh` includes it), and it's
+  the obvious candidate for the memory measurement (readiness item 5).
+
+### rustc-perf, 21 benchmarks, 3 runs
+
+Same sources and order as before. `*`: the off and on ranges overlap.
+
+| benchmark | build today | build headstart | saved | after rebase | check today | check headstart | saved | after rebase |
+|---|--:|--:|--:|--:|--:|--:|--:|--:|
+| serde_derive-1.0.219 | 7.48 s | 4.89 s | 35% | 34% | 4.91 s | 3.18 s | 35% | 34% |
+| tt-muncher | 2.00 s | 1.32 s | 34% | 37% | 1.58 s | 1.17 s | 26% | 29% |
+| clap_derive-4.5.32 | 7.12 s | 5.04 s | 29% | 33% | 5.01 s | 3.23 s | 36% | 33% |
+| unicode-normalization-0.1.24 | 1.72 s | 1.28 s | 26% | 21% | 1.65 s | 1.05 s | 36% | 34% |
+| html5ever | 14.76 s | 11.23 s | 24% | 24% | 14.98 s | 10.96 s | 27% | 29% |
+| hyper-1.6.0 | 2.31 s | 1.76 s | 24% | 24% | 1.99 s | 1.60 s | 20% | 9% |
+| wg-grammar | 8.98 s | 7.03 s | 22% | 21% | 8.61 s | 6.73 s | 22% | 20% |
+| nalgebra-0.33.0 | 20.56 s | 17.07 s | 17% | 19% | 19.22 s | 16.43 s | 15% | 16% |
+| regex-automata-0.4.8 | 9.31 s | 7.78 s | 16% | 17% | 6.25 s | 4.94 s | 21% | 19% |
+| projection-caching | 9.68 s | 8.39 s | 13% | 14% | 8.75 s | 7.65 s | 13% | 3% |
+| ripgrep-14.1.1 | 13.90 s | 12.16 s | 13% | 13% | 8.67 s | 6.75 s | 22% | 25% |
+| syn-2.0.101 | 5.13 s | 4.49 s | 12% | 10% | 3.00 s | 2.65 s | 12% | −14% |
+| image-0.25.6 | 26.13 s | 23.34 s | 11% | 12% | 18.54 s | 15.09 s | 19% | 19% |
+| diesel-2.2.10 | 33.32 s | 30.65 s | 8% | 8% | 31.28 s | 28.64 s | 8% | 6% |
+| cargo | 74.22 s | 68.36 s | 8% | 4% | 61.47 s | 56.87 s | 7% | 5% |
+| eza-0.21.2 | 43.07 s | 40.16 s | 7% | 9% | 37.59 s | 34.75 s | 8% | 5% |
+| html5ever-0.31.0 | 8.47 s | 7.97 s | 6% | 6% | 7.69 s | 7.22 s | 6%* | 8% |
+| piston-image | 8.75 s | 8.38 s | 4%* | 10% | 6.52 s | 5.50 s | 16% | 16% |
+| cargo-0.87.1 | 143.25 s | 139.10 s | 3% | 6% | 84.68 s | 81.29 s | 4% | 4% |
+| encoding | 1.64 s | 1.60 s | 2%* | 2% | 1.10 s | 1.07 s | 3%* | 4% |
+| cranelift-codegen-0.119.0 | 28.73 s | 28.22 s | 2% | 15% | 17.55 s | 17.06 s | 3% | −6% |
+
+- **All 21 are faster in both check (3–36%) and build (2–35%).** In
+  check, only html5ever-0.31.0 and encoding have overlapping ranges; in
+  build, only piston-image and encoding.
+- **The outliers after the rebase are gone.** syn's check (−14% then)
+  is 12%, hyper's 20% and projection-caching's 13%, as the 5-run re-time
+  predicted. cranelift-codegen's build (15%, overlapping, then; 5%
+  before the rebase) is 2%.
+- **Diagnostics were identical** in every run.
+- **The host was faster this time:** cargo-0.87.1's build took 143 s
+  without headstart, against 173 s after the rebase. As before, compare
+  the savings, not the times.
 
 ## After rebasing onto current master: 4 cores
 
