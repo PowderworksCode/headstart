@@ -38,6 +38,10 @@ run found, and adds codex-rs. The sections after them are from the
     identical diagnostics, and verify reports nothing.
   - stm32f4 fails in both modes because it needs a device feature; its
     build-script panic messages differ only in the thread ID.
+- **Known bug: incremental rebuilds can panic.** A second incremental
+  session of the same crate can fail with "early and full metadata
+  disagree on the SVH". Found on zed's `util` crate; not fixed yet. See
+  [ice-early-metadata-svh.md](ice-early-metadata-svh.md).
 - **Real projects.** 13 projects, 312 builds, all succeeded with
   identical diagnostics. The one exception is noise from the parallel
   front end itself (see "Real projects").
@@ -695,6 +699,83 @@ All three are fixed, and each is now covered by a sweep or a test.
      build failed; the work was wasted and the answers wrong.
    - **Fix:** it's skipped there now.
 
+
+## codex-rs: Linux, AMD EPYC 9554P, 16 jobs, 3 runs
+
+[openai/codex](https://github.com/openai/codex) at `d91294c`, the
+`codex-rs` workspace (about 1,470 crates in the lockfile), measured with
+rustc `6006fd03` and cargo `4f3fb242` plus this repository's patches.
+
+- **Setup:** clean builds, default dev profile, `scripts/bench.sh -n 3`,
+  off and on alternating.
+- **Changes needed to build it on this rustc,** the same in both modes:
+  - `allocative` 0.3.6 patched locally (`[patch.crates-io]`): rustc master
+    makes `Infallible = !`, which conflicts with its nightly-only
+    `impl Allocative for !`;
+  - `codex-voice-host` excluded: it needs GStreamer 1.28, and the VM has
+    1.24;
+  - `RUSTY_V8_ARCHIVE` and `RUSTY_V8_SRC_BINDING_PATH` set to codex's own
+    published `rusty_v8` build (upstream has no prebuilt for the sandboxed
+    configuration codex enables); its checksums match codex's
+    `MODULE.bazel`.
+- **Result:** all 24 builds succeeded. Diagnostics are identical with the
+  default front end; with `-Zthreads=8` the set of "overflow evaluating
+  the requirement" warnings varies from run to run, between two
+  headstart-off runs as much as between modes.
+
+| | today | headstart | saved |
+|---|--:|--:|--:|
+| `cargo check` | 383.8 s | 277.1 s | 28% |
+| `cargo build` | 530.7 s | 330.8 s | 38% |
+| `cargo check`, `-Zthreads=8` | 220.0 s | 190.5 s | 13% |
+| `cargo build`, `-Zthreads=8` | 317.3 s | 249.2 s | 21% |
+
+The workspace is a deep chain of its own crates: `codex-protocol`,
+`codex-app-server-protocol`, `codex-core` (over 2 minutes on its own),
+`codex-app-server`, `codex-tui`. Without headstart they run one after
+another while most of the 16 cores sit idle; with it, each starts on the
+early metadata of the one before.
+
+**Incremental `cargo check`,** after editing one function body, with a
+warm target directory per mode (`scripts/bench-incremental.sh`, median of
+5 edits):
+
+| edited | today | headstart | saved |
+|---|--:|--:|--:|
+| `codex-core` (`prepare_apply_patch`) | 28.8 s | 24.2 s | 16% |
+| `codex-protocol` (`format_with_separators`) | 61.4 s | 51.6 s | 16% |
+
+### What the build looks like
+
+Recorded with [cratebank](https://github.com/PowderworksCode/cratebank)
+(`cargo build --timings` plus samply), one clean `cargo build` per mode,
+and drawn with cratebank's own chart code on a shared time axis. Under
+samply the builds took 511 s and 323 s.
+
+![codex-rs utilization, headstart off vs on](images/codex-rs-utilization-off-vs-on.png)
+
+Without headstart, the machine is busy for the first 100 s, while
+crates.io dependencies compile, and then mostly runs one or two units at
+a time down the workspace chain. With headstart, `codex-core` starts at
+120 s instead of 237 s, and the build ends 190 s sooner.
+
+![codex-rs, what waited for what, headstart off vs on](images/codex-rs-waited-for-what-off-vs-on.png)
+
+Time across, dependency depth down; each unit is drawn under the
+dependency that released it, coloured by compiler phase. The chain is 34
+levels deep without headstart and 29 with it, and the workspace crates
+stack up in parallel instead of forming a staircase.
+
+- **sccache disables headstart.** A `rustc-wrapper` that buffers rustc's
+  output until it exits (sccache does) hides the early-metadata
+  notification from cargo, so nothing starts early. These recordings set
+  `RUSTC_WRAPPER=` to bypass a global sccache config; `scripts/bench.sh`
+  already replaces the wrapper.
+- **The phase colours are approximate.** cratebank's join misses
+  workspace crates (cargo reports `codex-core` 0.0.0, the profiler
+  `codex_core` with no version), so for these figures they were joined by
+  crate name. Its attribution also puts an implausible 55% of samples in
+  "startup" with this locally built rustc.
 
 ## Earlier measurements (first, check-only version)
 
