@@ -61,7 +61,14 @@ A clean `cargo build` of [codex-rs](https://github.com/openai/codex) on
 [cratebank](https://github.com/PowderworksCode/cratebank). Without
 headstart, the workspace's own crates compile one after another while
 the machine sits mostly idle; with it, each starts on the early metadata
-of the one before, and the build is 37% faster. More in
+of the one before, and the build is 37% faster.
+
+![codex-rs, what waited for what, headstart off vs on](docs/images/codex-rs-waited-for-what-off-vs-on.png)
+
+The same two builds, with time across and dependency depth down: each
+unit is drawn under the dependency that released it, coloured by compiler
+phase. Without headstart the workspace crates form a long staircase; with
+it they overlap. More in
 [docs/results.md](docs/results.md#codex-rs-linux-amd-epyc-9554p-16-jobs-3-runs).
 
 How it works, what early metadata leaves out, and the risks:
