@@ -54,6 +54,16 @@ gain comes from cores the build would leave idle, so it shrinks on
 smaller machines. On 4 cores, rust-analyzer's check is 24% faster and
 its build 13–15%, and wide builds come out even.
 
+![codex-rs clean cargo build, headstart off vs on](docs/images/codex-rs-utilization-off-vs-on.png)
+
+A clean `cargo build` of [codex-rs](https://github.com/openai/codex) on
+16 cores, recorded with
+[cratebank](https://github.com/PowderworksCode/cratebank). Without
+headstart, the workspace's own crates compile one after another while
+the machine sits mostly idle; with it, each starts on the early metadata
+of the one before, and the build is 37% faster. More in
+[docs/results.md](docs/results.md#codex-rs-linux-amd-epyc-9554p-16-jobs-3-runs).
+
 How it works, what early metadata leaves out, and the risks:
 [docs/design.md](docs/design.md). Measurements:
 [docs/results.md](docs/results.md). Whether it's ready to bring to the
