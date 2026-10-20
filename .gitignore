@@ -5,3 +5,5 @@ rustc-ice-*.txt
 /tests/errors/target/
 # Benchmark output (scripts/bench*.sh), kept out of git for now.
 /results/
+# scripts/release.sh scratch space (PGO/BOLT profiles).
+/release-work/
