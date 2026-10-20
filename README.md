@@ -93,10 +93,18 @@ RUSTC=/path/to/headstart/rustc/build/host/stage1/bin/rustc \
 headstart = true` in `.cargo/config.toml`. Without it, the patched cargo
 behaves like upstream, so the same binaries give a fair baseline.
 
-`tests/smoke` is a two-crate workspace that shows the effect. Its `slow`
-library takes several seconds to check, almost all of it in function
-bodies. With headstart on, `app` starts about 0.2 s in instead of
-waiting for `slow` to finish.
+Turn off any compile cache when timing: sccache, or any `rustc-wrapper`
+that holds back rustc's output until it exits, hides the early metadata
+and so turns headstart off. `RUSTC_WRAPPER=` overrides a global one. To
+compare against rustup's nightly, build with `scripts/release.sh` first
+(see [Comparing with nightly](#comparing-with-nightly)).
+
+`tests/smoke` is a two-crate workspace that shows the effect in `cargo
+check`. Its `slow` library spends almost all of its check time in
+function bodies. With headstart on, `app` starts as soon as `slow`'s
+interface is checked instead of waiting for `slow` to finish. It shows
+nothing in `cargo build`: `app` is too small to have work to start
+early, so it times only the compiler.
 
 `scripts/check-errors.sh` checks the claim about errors on
 `tests/errors`. It runs three scenarios (a clean build, an error in a
@@ -160,3 +168,26 @@ editing one function body. `scripts/log-rustc` records when each rustc run
 started and ended, so you can see the schedule. The rustc-perf benchmarks
 are under `rustc/src/tools/rustc-perf/collector/compile-benchmarks`
 (`git -C rustc submodule update --init --depth 1 src/tools/rustc-perf`).
+
+### Comparing with nightly
+
+`setup.sh` builds a development rustc, about twice as slow as rustup's
+nightly, which is optimized with PGO and BOLT. Compared with nightly, it
+makes headstart look slower. To build headstart's rustc the way nightly
+is built:
+
+```sh
+scripts/release.sh  # after setup.sh; about an hour on 16 cores, 25 GB of disk
+```
+
+This leaves `rustc/build-pgo/host/stage2/bin/rustc`. A clean ripgrep
+build on 6 cores, against nightly-2026-10-12:
+
+| | `check` | `build` |
+|---|---|---|
+| nightly | 3.76 s | 7.28 s |
+| `release.sh` rustc, headstart off | 4.18 s | 7.76 s |
+| `release.sh` rustc, headstart on | 2.64 s | 5.85 s |
+
+The BOLT step needs `llvm-bolt` and `merge-fdata` from LLVM 19 or newer;
+without them `release.sh` stops after PGO, which gives most of the gain.
