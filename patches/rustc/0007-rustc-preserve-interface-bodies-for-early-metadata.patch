@@ -1,14 +1,29 @@
-From 509013b2f4fdc4f8fd090693cba1d3ef2db297ea Mon Sep 17 00:00:00 2001
+From 2956dc5cbc9d8b599ef52a9c8adc06ae2aa29f36 Mon Sep 17 00:00:00 2001
 From: Stanley Chisango <47616017+scooter-lacroix@users.noreply.github.com>
 Date: Thu, 22 Oct 2026 17:33:13 -0400
 Subject: [PATCH 7/7] rustc: preserve interface bodies for early metadata
 
+`prepare_early_metadata` computed the interface-body set that the early
+encoder needs, then dropped it, so `encode_early_metadata` had no way to
+hand it to `with_encode_metadata_header`. Return it and pass it through.
+
+The full-metadata and stub calls pass `None`, as before, so the non-early
+path is unchanged.
+
+The early write sets the crate hash, and the full encoder asserts the two
+agree, so the full write reuses that hash instead of digesting its own
+bytes a second time. Only the byte feed is skipped: the HIR hash that is
+folded into the supplement is still computed unconditionally, because
+`compute_hir_hash` reads dep-graph queries and the full write runs inside
+the metadata dep-node's task. Skipping it would leave that node green
+after a body-only edit, and the reused work product's stale hash would
+then disagree with the freshly computed early one.
 ---
- compiler/rustc_metadata/src/rmeta/encoder.rs | 22 ++++++++++++--------
- 1 file changed, 13 insertions(+), 9 deletions(-)
+ compiler/rustc_metadata/src/rmeta/encoder.rs | 28 +++++++++++++-------
+ 1 file changed, 19 insertions(+), 9 deletions(-)
 
 diff --git a/compiler/rustc_metadata/src/rmeta/encoder.rs b/compiler/rustc_metadata/src/rmeta/encoder.rs
-index 6feb4eb1a..979e12c66 100644
+index 6feb4eb1a..88c2556b8 100644
 --- a/compiler/rustc_metadata/src/rmeta/encoder.rs
 +++ b/compiler/rustc_metadata/src/rmeta/encoder.rs
 @@ -2652,7 +2652,7 @@ fn interface_bodies(tcx: TyCtxt<'_>) -> FxHashSet<LocalDefId> {
@@ -77,19 +92,35 @@ index 6feb4eb1a..979e12c66 100644
      f: impl FnOnce(&mut EncodeContext<'_, '_>) -> (usize, usize),
  ) {
      // By default the crate hash (SVH) is computed from the bytes of the encoded metadata,
-@@ -2943,8 +2945,10 @@ fn with_encode_metadata_header(
+@@ -2943,10 +2945,16 @@ fn with_encode_metadata_header(
      // hash; that is sufficient here because the SVH is only a change detector, is never keyed
      // secretly (it must be reproducible), and compiling a crate already runs its build scripts and
      // proc-macros, so the crate author is trusted regardless.
 +    // Early metadata already computed the hash; full metadata reuses it and need not hash its bytes.
 +    let hash_metadata = metadata_crate_hash && tcx.untracked().local_crate_hash.get().is_none();
      let metadata_hasher = Arc::new(Mutex::new(XxHash3_128::new()));
--    if metadata_crate_hash {
-+    if hash_metadata {
+     if metadata_crate_hash {
          // Fold in inputs that are not part of the encoded metadata bytes, reduced to a single
          // fingerprint via the stable hasher and then mixed into the byte digest.
++        //
++        // Recorded even when `hash_metadata` is false: `compute_hir_hash` reads dep-graph
++        // queries, and this runs inside the metadata dep-node's task, so it is what keeps a
++        // body-only edit from leaving that node green.
          let hir_body_hash = compute_hir_hash(tcx);
-@@ -2965,7 +2969,7 @@ fn with_encode_metadata_header(
+         let supplement: Fingerprint = tcx.with_stable_hashing_context(|mut hcx| {
+             let mut hasher = StableHasher::new();
+@@ -2956,7 +2964,9 @@ fn with_encode_metadata_header(
+             hir_body_hash.stable_hash(&mut hcx, &mut hasher);
+             hasher.finish()
+         });
+-        metadata_hasher.lock().unwrap().write(&supplement.to_le_bytes());
++        if hash_metadata {
++            metadata_hasher.lock().unwrap().write(&supplement.to_le_bytes());
++        }
+     }
+ 
+     // Feed every flushed byte into `metadata_hasher` so the SVH covers the entire encoded metadata.
+@@ -2965,7 +2975,7 @@ fn with_encode_metadata_header(
          move |bytes: &[u8]| metadata_hasher.lock().unwrap().write(bytes)
      };
  
@@ -98,7 +129,7 @@ index 6feb4eb1a..979e12c66 100644
          FileEncoder::with_flush_strategy(path, &mut flush_strategy)
      } else {
          FileEncoder::new(path)
-@@ -3004,7 +3008,7 @@ fn with_encode_metadata_header(
+@@ -3004,7 +3014,7 @@ fn with_encode_metadata_header(
          hygiene_ctxt: Default::default(),
          symbol_index_table: Default::default(),
          early,
