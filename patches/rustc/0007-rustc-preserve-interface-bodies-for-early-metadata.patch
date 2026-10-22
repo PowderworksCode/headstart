@@ -1,0 +1,112 @@
+From 509013b2f4fdc4f8fd090693cba1d3ef2db297ea Mon Sep 17 00:00:00 2001
+From: Stanley Chisango <47616017+scooter-lacroix@users.noreply.github.com>
+Date: Thu, 22 Oct 2026 17:33:13 -0400
+Subject: [PATCH 7/7] rustc: preserve interface bodies for early metadata
+
+---
+ compiler/rustc_metadata/src/rmeta/encoder.rs | 22 ++++++++++++--------
+ 1 file changed, 13 insertions(+), 9 deletions(-)
+
+diff --git a/compiler/rustc_metadata/src/rmeta/encoder.rs b/compiler/rustc_metadata/src/rmeta/encoder.rs
+index 6feb4eb1a..979e12c66 100644
+--- a/compiler/rustc_metadata/src/rmeta/encoder.rs
++++ b/compiler/rustc_metadata/src/rmeta/encoder.rs
+@@ -2652,7 +2652,7 @@ fn interface_bodies(tcx: TyCtxt<'_>) -> FxHashSet<LocalDefId> {
+ /// the encoder, as an error type or tainted MIR, which can't be encoded. If
+ /// one reports an error, no early metadata is written, and the crate fails
+ /// as it would without `-Zearly-metadata`.
+-fn prepare_early_metadata(tcx: TyCtxt<'_>) {
++fn prepare_early_metadata(tcx: TyCtxt<'_>) -> FxHashSet<LocalDefId> {
+     let bodies = interface_bodies(tcx);
+     // Sorted, so diagnostics come out in a deterministic order.
+     #[allow(rustc::potential_query_instability)]
+@@ -2688,6 +2688,7 @@ fn prepare_early_metadata(tcx: TyCtxt<'_>) {
+             tcx.ensure_ok().mir_coroutine_witnesses(def_id);
+         }
+     });
++    bodies
+ }
+ 
+ // NOTE(eddyb) The following comment was preserved for posterity, even
+@@ -2842,7 +2843,7 @@ pub fn encode_metadata(tcx: TyCtxt<'_>, path: &Path, ref_path: Option<&Path>) {
+         if let Some(ref_path) = ref_path {
+             let _prof_timer = tcx.prof.verbose_generic_activity("generate_crate_metadata_stub");
+ 
+-            with_encode_metadata_header(tcx, ref_path, false, |ecx| {
++            with_encode_metadata_header(tcx, ref_path, false, None, |ecx| {
+                 let header: LazyValue<CrateHeader> = ecx.lazy(CrateHeader {
+                     name: tcx.crate_name(LOCAL_CRATE),
+                     triple: tcx.sess.opts.target_triple.clone(),
+@@ -2875,7 +2876,7 @@ pub fn encode_metadata(tcx: TyCtxt<'_>, path: &Path, ref_path: Option<&Path>) {
+         dep_node,
+         tcx,
+         || {
+-            with_encode_metadata_header(tcx, path, false, |ecx| {
++            with_encode_metadata_header(tcx, path, false, None, |ecx| {
+                 // Encode all the entries and extra information in the crate,
+                 // culminating in the `CrateRoot` which points to all of it.
+                 let (root, unhashed) = ecx.encode_crate_root();
+@@ -2899,7 +2900,7 @@ pub fn encode_metadata(tcx: TyCtxt<'_>, path: &Path, ref_path: Option<&Path>) {
+     if let Some(ref_path) = ref_path {
+         let _prof_timer = tcx.prof.verbose_generic_activity("generate_crate_metadata_stub");
+ 
+-        with_encode_metadata_header(tcx, ref_path, false, |ecx| {
++        with_encode_metadata_header(tcx, ref_path, false, None, |ecx| {
+             let header: LazyValue<CrateHeader> = ecx.lazy(CrateHeader {
+                 name: tcx.crate_name(LOCAL_CRATE),
+                 triple: tcx.sess.opts.target_triple.clone(),
+@@ -2918,11 +2919,11 @@ pub fn encode_metadata(tcx: TyCtxt<'_>, path: &Path, ref_path: Option<&Path>) {
+ pub fn encode_early_metadata(tcx: TyCtxt<'_>, path: &Path) {
+     tcx.dep_graph.assert_ignored();
+     let _prof_timer = tcx.prof.verbose_generic_activity("generate_crate_metadata_early");
+-    prepare_early_metadata(tcx);
++    let bodies = prepare_early_metadata(tcx);
+     if tcx.dcx().has_errors_or_delayed_bugs().is_some() {
+         return;
+     }
+-    with_encode_metadata_header(tcx, path, true, |ecx| {
++    with_encode_metadata_header(tcx, path, true, Some(bodies), |ecx| {
+         let (root, unhashed) = ecx.encode_crate_root();
+         ecx.opaque.flush();
+         (root.position.get(), unhashed.position.get())
+@@ -2933,6 +2934,7 @@ fn with_encode_metadata_header(
+     tcx: TyCtxt<'_>,
+     path: &Path,
+     early: bool,
++    interface_bodies: Option<FxHashSet<LocalDefId>>,
+     f: impl FnOnce(&mut EncodeContext<'_, '_>) -> (usize, usize),
+ ) {
+     // By default the crate hash (SVH) is computed from the bytes of the encoded metadata,
+@@ -2943,8 +2945,10 @@ fn with_encode_metadata_header(
+     // hash; that is sufficient here because the SVH is only a change detector, is never keyed
+     // secretly (it must be reproducible), and compiling a crate already runs its build scripts and
+     // proc-macros, so the crate author is trusted regardless.
++    // Early metadata already computed the hash; full metadata reuses it and need not hash its bytes.
++    let hash_metadata = metadata_crate_hash && tcx.untracked().local_crate_hash.get().is_none();
+     let metadata_hasher = Arc::new(Mutex::new(XxHash3_128::new()));
+-    if metadata_crate_hash {
++    if hash_metadata {
+         // Fold in inputs that are not part of the encoded metadata bytes, reduced to a single
+         // fingerprint via the stable hasher and then mixed into the byte digest.
+         let hir_body_hash = compute_hir_hash(tcx);
+@@ -2965,7 +2969,7 @@ fn with_encode_metadata_header(
+         move |bytes: &[u8]| metadata_hasher.lock().unwrap().write(bytes)
+     };
+ 
+-    let mut encoder = if metadata_crate_hash {
++    let mut encoder = if hash_metadata {
+         FileEncoder::with_flush_strategy(path, &mut flush_strategy)
+     } else {
+         FileEncoder::new(path)
+@@ -3004,7 +3008,7 @@ fn with_encode_metadata_header(
+         hygiene_ctxt: Default::default(),
+         symbol_index_table: Default::default(),
+         early,
+-        interface_bodies: None,
++        interface_bodies,
+         deferred_mir: Default::default(),
+         deferred_defs: Default::default(),
+     };
+-- 
+2.56.0
+
