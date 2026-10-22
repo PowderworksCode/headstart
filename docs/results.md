@@ -20,8 +20,9 @@ their timing tables are superseded by the current ones.
 "Reproduction on 4 cores" reruns most of it on a 4-core container, and
 "After rebasing onto current master" reruns that on the rebased
 patches. "The final series" validates and times the patches as they
-are now, after the cleanup, the output locks and the fixes the forced UI
-run found, and adds codex-rs. The sections after them are from the
+stood after the cleanup, the output locks and the fixes the forced UI
+run found, and adds codex-rs. It predates the seventh rustc commit, whose
+note is under its heading. The sections after them are from the
 16-core VM.
 
 ## Correctness (current version)
@@ -88,10 +89,19 @@ The sweeps found two bugs in the swap to full metadata, both fixed:
 ## The final series: 4 cores
 
 The six rustc and three cargo commits in [patches/](../patches), as they
-are now, on the same 4-core container, against the same masters
+were when these runs were made, on the same 4-core container, against the
+same masters
 (rust-lang/rust `6006fd0`, cargo `4f3fb24`). Since "After rebasing onto
 current master" below, the patches gained the output locks (instead of polling), `-Zheadstart`, the
 commit split, and the fixes from the forced UI run.
+
+Commit 7, which stops the metadata hash path from hashing bytes it
+already hashed, was added after these runs. With the flag on, the full
+write already reused the hash the early write set — the encoder asserts
+the two agree — so the metadata bytes and the moment early metadata is
+written are unchanged, and these measurements still describe the series
+as it now stands. It was checked with `./x fmt --check`, `./x test
+tidy`, and `./x test tests/run-make/early-metadata`.
 
 ### Correctness
 

@@ -23,7 +23,7 @@ at the end of the round that added the real-project measurements
   - Nothing meaningfully slower.
   - [readiness.md](readiness.md) assesses whether it's ready to bring to
     the compiler and cargo teams.
-- **In upstream shape.** The patches are a commit series, six for rustc
+- **In upstream shape.** The patches are a commit series, seven for rustc
   and three for cargo, each building on its own, `fmt` and `tidy` clean,
   with in-tree tests ([patches/README.md](../patches/README.md)):
   - Waiting uses output locks instead of polling.

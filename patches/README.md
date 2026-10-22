@@ -28,10 +28,16 @@ Every commit builds on its own, and passes the repository's own checks:
 | 4 | Add `-Zearly-metadata`: write metadata once item interfaces are checked | The writing side: the early file, the shared crate hash, and the output locks dependents wait on. Adds two UI tests in `tests/ui/rmeta/`. |
 | 5 | Load early metadata, and swap in full metadata before codegen | The reading side: the locator, the swap to full metadata, and waiting for full metadata and rlibs on their locks. Adds `tests/run-make/early-metadata`. |
 | 6 | Add `-Zearly-metadata-verify` | The checks the benchmark sweeps rely on. |
+| 7 | rustc: preserve interface bodies for early metadata | Passes the interface-body set from `prepare_early_metadata` through to `with_encode_metadata_header`, where it was computed and dropped. The full write reuses the hash the early write set instead of digesting its bytes a second time; the HIR hash folded into the supplement is still computed unconditionally, so the metadata dep-node stays red after a body-only edit. No behavior change with the flag off. |
 
-Commits 2 to 6 need a compiler MCP: `-Zearly-metadata` is a new unstable
+Commits 2 to 7 need a compiler MCP: `-Zearly-metadata` is a new unstable
 flag, and it extends `--json=artifacts` with three notification kinds
 (`early-metadata`, `wait-metadata`, `resume`).
+
+Commit 7 postdates commits 1–6, so its embedded diff index and its
+`[PATCH 7/7]` subject are regenerated against the series as it now
+stands. Commits 1–6 are unchanged, and still read `[PATCH n/6]`; `git am`
+does not care about the n/m counters.
 
 Tests:
 - `./x test tests/run-make/early-metadata tests/ui/rmeta`.

@@ -27,7 +27,7 @@ errors reported slightly later, and more memory in use at once (see
 
 ## Pieces
 
-- **rustc, `-Zearly-metadata`** ([6 patches](patches/rustc)):
+- **rustc, `-Zearly-metadata`** ([7 patches](patches/rustc)):
   - a new `analysis_interfaces` query splits analysis into item
     interfaces and function bodies;
   - the driver writes `.early-rmeta` between the two;

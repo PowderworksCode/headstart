@@ -174,7 +174,7 @@ cargo build.
 - **cargo's switch is `-Zheadstart`**, a regular unstable flag (also
   `[unstable] headstart` or `CARGO_UNSTABLE_HEADSTART`), documented in
   `unstable.md`, instead of an environment variable.
-- **Commit series.** The rustc patch is six commits and the cargo patch
+- **Commit series.** The rustc patch is seven commits and the cargo patch
   three, each building on its own, with messages written for reviewers.
   - The reachable-set change is the first commit, independent of the
     flag, and can be its own PR.
