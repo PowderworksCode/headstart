@@ -195,9 +195,10 @@ cargo build.
 
 ## What to do next
 
-1. **Measure on 16 and 8 cores** with `scripts/bench-suite.sh`, on the
+1. **Measure on 16, 8 and 4 cores** with `scripts/bench-suite.sh`, on the
    current series. The 16-core numbers predate the last fixes and the
-   cleanup, and 8 cores is the common laptop size.
+   cleanup, the 4-core ones predate commit 7, and 8 cores is the common
+   laptop size.
 2. **Measure memory and error delay** on the current version
    (next-steps items 3 and 10), starting with codex-rs's `cargo build`.
 3. **Write the Zulip post and the MCP.** They should state:

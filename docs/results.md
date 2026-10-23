@@ -97,28 +97,22 @@ commit split, and the fixes from the forced UI run.
 
 These are pre-commit-7 numbers, and should be read as historical. They
 were taken on the six-commit rustc series, before commit 7, which
-removes work these runs performed: when early metadata has already set
-the crate hash, the full write now takes `FileEncoder::new` instead of
+removes work these runs performed: once early metadata has set the crate
+hash, the full write takes `FileEncoder::new` instead of
 `with_flush_strategy`, so it no longer feeds every flushed byte through
 `XxHash3` under a mutex, and skips the supplement write. The metadata
-bytes are still unchanged, because the full write takes its SVH from
-`local_crate_hash` (`encoder.rs`, `encode_crate_root`) rather than
-digesting its own bytes, so in that path the hasher was being fed and
-never read. The work removed is also all in the full write, after the
-early file is already on disk, so the moment early metadata is written
-doesn't move. But the timing tables below still include that hashing.
+bytes are still unchanged — the full write takes its SVH from
+`local_crate_hash` (`encode_crate_root`) rather than digesting its own
+output, so in that path the hasher was fed and never read — and the
+removed work is all in the full write, after the early file is on disk,
+so the moment early metadata is written doesn't move. The timings below
+still include that hashing.
 
-Nothing here was re-measured for the current series. What bounds the
-error: the work removed is hashing at `XxHash3` throughput over one
-crate's metadata, so it should be small next to the build times in these
-tables, and on the headstart-off side the full write is untouched
-(`local_crate_hash` is unset there, so it takes the old path), which
-means the reported savings are if anything conservative. That leaves one
-other change, on both sides, when incremental compilation reuses a
-saved `.rmeta` and sets `local_crate_hash` from it: the metadata *stub*
-written there also skips hashing now, and a stub is small. "Should be" is
-the whole claim: this is inferred from the code, not measured. Re-running
-on 4 cores is tracked in
+Nothing here was re-measured. The removed work is hashing at `XxHash3`
+throughput over one crate's metadata, and the headstart-off full write is
+untouched (`local_crate_hash` is unset there), so the savings should be
+if anything conservative. "Should be" is the whole claim; it's inferred
+from the code, not measured. The rerun is tracked in
 [readiness.md](readiness.md#what-to-do-next).
 
 Commit 7 itself was checked with `./x fmt --check`, `./x test tidy`, and
