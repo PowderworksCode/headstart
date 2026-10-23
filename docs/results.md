@@ -95,13 +95,34 @@ same masters
 current master" below, the patches gained the output locks (instead of polling), `-Zheadstart`, the
 commit split, and the fixes from the forced UI run.
 
-Commit 7, which stops the metadata hash path from hashing bytes it
-already hashed, was added after these runs. With the flag on, the full
-write already reused the hash the early write set — the encoder asserts
-the two agree — so the metadata bytes and the moment early metadata is
-written are unchanged, and these measurements still describe the series
-as it now stands. It was checked with `./x fmt --check`, `./x test
-tidy`, and `./x test tests/run-make/early-metadata`.
+These are pre-commit-7 numbers, and should be read as historical. They
+were taken on the six-commit rustc series, before commit 7, which
+removes work these runs performed: when early metadata has already set
+the crate hash, the full write now takes `FileEncoder::new` instead of
+`with_flush_strategy`, so it no longer feeds every flushed byte through
+`XxHash3` under a mutex, and skips the supplement write. The metadata
+bytes are still unchanged, because the full write takes its SVH from
+`local_crate_hash` (`encoder.rs`, `encode_crate_root`) rather than
+digesting its own bytes, so in that path the hasher was being fed and
+never read. The work removed is also all in the full write, after the
+early file is already on disk, so the moment early metadata is written
+doesn't move. But the timing tables below still include that hashing.
+
+Nothing here was re-measured for the current series. What bounds the
+error: the work removed is hashing at `XxHash3` throughput over one
+crate's metadata, so it should be small next to the build times in these
+tables, and on the headstart-off side the full write is untouched
+(`local_crate_hash` is unset there, so it takes the old path), which
+means the reported savings are if anything conservative. That leaves one
+other change, on both sides, when incremental compilation reuses a
+saved `.rmeta` and sets `local_crate_hash` from it: the metadata *stub*
+written there also skips hashing now, and a stub is small. "Should be" is
+the whole claim: this is inferred from the code, not measured. Re-running
+on 4 cores is tracked in
+[readiness.md](readiness.md#what-to-do-next).
+
+Commit 7 itself was checked with `./x fmt --check`, `./x test tidy`, and
+`./x test tests/run-make/early-metadata`.
 
 ### Correctness
 
